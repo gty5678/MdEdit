@@ -1,0 +1,40 @@
+# Build and deployment output (CMake / Qt)
+/build/
+/build-*/
+/cmake-build-*/
+/out/
+/dist/
+
+# CMake / Ninja files from in-source builds
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Testing/
+/build.ninja
+/rules.ninja
+/.ninja_deps
+/.ninja_log
+/.qt/
+/*_autogen/
+/compile_commands.json
+
+# Local IDE and CMake settings
+/.vs/
+/CMakeUserPresets.json
+*.user
+*.user.*
+*.suo
+
+# OS metadata and editor temporary files
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+
+# vcpkg local packages and downloads
+/vcpkg_installed/
+/.vcpkg/

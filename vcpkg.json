@@ -1,0 +1,37 @@
+{
+  "name": "mdedit",
+  "version": "1.1.0",
+  "dependencies": [
+    "microtex",
+    {
+      "name": "qtbase",
+      "default-features": false,
+      "features": [
+        "jpeg",
+        "png",
+        "widgets"
+      ]
+    },
+    {
+      "name": "qtbase",
+      "default-features": false,
+      "features": [
+        "fontconfig",
+        "xcb",
+        "xcb-xlib",
+        "xrender"
+      ],
+      "platform": "linux"
+    },
+    {
+      "name": "qtbase",
+      "default-features": false,
+      "features": [
+        "windeployqt"
+      ],
+      "platform": "windows"
+    },
+    "qtsvg",
+    "tinyxml2"
+  ]
+}
