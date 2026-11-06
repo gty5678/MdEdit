@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 project(MdEdit VERSION 1.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-find_package(Qt6 6.5 CONFIG REQUIRED COMPONENTS Widgets Svg)
+find_package(Qt6 6.12.0 CONFIG REQUIRED COMPONENTS Widgets Svg)
 find_package(MicroTeX CONFIG REQUIRED)
 qt_standard_project_setup()
 qt_add_executable(MdEdit WIN32 MACOSX_BUNDLE src/main.cpp)
@@ -19,6 +19,11 @@ endif()
 target_link_libraries(MdEdit PRIVATE Qt6::Widgets Qt6::Svg MicroTeX::MicroTeX)
 if(MSVC)
   target_compile_options(MdEdit PRIVATE /utf-8 /W4)
+endif()
+if(WIN32)
+  # vcpkg keeps Qt plugins outside the executable directory in the build tree.
+  file(GENERATE OUTPUT "$<TARGET_FILE_DIR:MdEdit>/qt.conf"
+    CONTENT "[Paths]\nPlugins=$<TARGET_FILE_DIR:Qt6::QWindowsIntegrationPlugin>/..\n")
 endif()
 add_custom_command(TARGET MdEdit POST_BUILD
  COMMAND ${CMAKE_COMMAND} -E copy_directory "${MicroTeX_RESOURCE_DIR}" "${MDEDIT_RESOURCE_DIR}/res"
@@ -45,14 +50,43 @@ install(DIRECTORY "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/"
   DESTINATION "${MDEDIT_INSTALL_RESOURCES}/licenses" FILES_MATCHING PATTERN "copyright")
 qt_generate_deploy_app_script(TARGET MdEdit OUTPUT_SCRIPT deploy_script
   NO_UNSUPPORTED_PLATFORM_ERROR)
+if(MINGW)
+  # The deployment tools also use Qt DLLs from the vcpkg bin directory.
+  install(CODE "set(QT_DEPLOY_PLUGINS_DIR plugins)")
+  install(CODE "set(ENV{PATH} \"$<TARGET_FILE_DIR:Qt6::Core>;\$ENV{PATH}\")")
+endif()
 install(SCRIPT ${deploy_script})
+if(MINGW)
+  get_filename_component(MDEDIT_COMPILER_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  install(CODE "
+    set(bin \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
+    file(GLOB_RECURSE plugins \"\${CMAKE_INSTALL_PREFIX}/plugins/*.dll\")
+    set(CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND \"${CMAKE_OBJDUMP}\")
+    set(CMAKE_GET_RUNTIME_DEPENDENCIES_TOOL objdump)
+    file(GET_RUNTIME_DEPENDENCIES
+      EXECUTABLES \"\${bin}/$<TARGET_FILE_NAME:MdEdit>\"
+      MODULES \${plugins}
+      DIRECTORIES \"\${bin}\" \"$<TARGET_FILE_DIR:Qt6::Core>\" \"${MDEDIT_COMPILER_BIN}\"
+      RESOLVED_DEPENDENCIES_VAR dependencies
+      PRE_EXCLUDE_REGEXES \"^(api-ms-|ext-ms-)\"
+      POST_EXCLUDE_REGEXES \"/([Ss][Yy][Ss][Tt][Ee][Mm]32|[Ss][Yy][Ss][Ww][Oo][Ww]64)/\")
+    foreach(dependency IN LISTS dependencies)
+      get_filename_component(name \"\${dependency}\" NAME)
+      if(NOT EXISTS \"\${bin}/\${name}\")
+        file(INSTALL DESTINATION \"\${bin}\" TYPE SHARED_LIBRARY FILES \"\${dependency}\")
+      endif()
+    endforeach()
+  ")
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
   add_test(NAME markdown-math-smoke COMMAND MdEdit --smoke-test "${CMAKE_CURRENT_SOURCE_DIR}/综合测试.md")
   set_tests_properties(markdown-math-smoke PROPERTIES TIMEOUT 60)
   if(WIN32)
-    set_tests_properties(markdown-math-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=windows")
+    set_tests_properties(markdown-math-smoke PROPERTIES
+      ENVIRONMENT "QT_QPA_PLATFORM=windows"
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
   elseif(APPLE)
     set_tests_properties(markdown-math-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=cocoa")
   else()

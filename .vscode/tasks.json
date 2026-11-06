@@ -24,6 +24,12 @@
           "windows-qt-debug"
         ],
         "problemMatcher": []
+      },
+      "linux": {
+        "args": [
+          "--preset",
+          "linux-debug"
+        ]
       }
     },
     {
@@ -62,6 +68,14 @@
         "problemMatcher": [
           "$msCompile"
         ]
+      },
+      "linux": {
+        "args": [
+          "--build",
+          "--preset",
+          "linux-debug",
+          "--parallel"
+        ]
       }
     },
     {
@@ -75,7 +89,19 @@
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "problemMatcher": []
+      "problemMatcher": [],
+      "windows": {
+        "args": [
+          "--preset",
+          "windows-release"
+        ]
+      },
+      "linux": {
+        "args": [
+          "--preset",
+          "linux-release"
+        ]
+      }
     },
     {
       "label": "CMake: Build Release",
@@ -97,6 +123,22 @@
       "group": {
         "kind": "build",
         "isDefault": false
+      },
+      "windows": {
+        "args": [
+          "--build",
+          "--preset",
+          "windows-release",
+          "--parallel"
+        ]
+      },
+      "linux": {
+        "args": [
+          "--build",
+          "--preset",
+          "linux-release",
+          "--parallel"
+        ]
       }
     },
     {
@@ -105,7 +147,29 @@
       "command": "${workspaceFolder}/build/macos-qt-release/MdEdit.app/Contents/MacOS/MdEdit",
       "args": [],
       "dependsOn": "CMake: Build Release",
-      "problemMatcher": []
+      "problemMatcher": [],
+      "windows": {
+        "command": "${workspaceFolder}/build/windows-release/MdEdit.exe",
+        "options": {
+          "env": {
+            "PATH": "${workspaceFolder}/build/windows-deps/vcpkg_installed/x64-mingw-dynamic/bin;${env:PATH}"
+          }
+        }
+      },
+      "linux": {
+        "command": "${workspaceFolder}/build-vcpkg/MdEdit"
+      }
+    },
+    {
+      "label": "MdEdit: Package Windows",
+      "type": "shell",
+      "command": ".\\build.cmd",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
     }
   ]
 }

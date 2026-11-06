@@ -27,6 +27,7 @@
       "name": "qtbase",
       "default-features": false,
       "features": [
+        "doubleconversion",
         "windeployqt"
       ],
       "platform": "windows"

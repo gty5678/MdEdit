@@ -2,25 +2,79 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "release",
+      "name": "vcpkg-release",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-vcpkg",
       "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true
+      },
+      "hidden": true
+    },
+    {
+      "name": "release",
+      "inherits": "vcpkg-release",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-mingw",
+      "hidden": true,
+      "inherits": "vcpkg-release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
+        "VCPKG_HOST_TRIPLET": "x64-mingw-dynamic",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/build/windows-deps/vcpkg_installed"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "inherits": "windows-mingw",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "windows-release",
-      "inherits": "release"
+      "inherits": "windows-mingw"
     },
     {
       "name": "macos-release",
-      "inherits": "release"
+      "inherits": "vcpkg-release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "inherits": "linux-release",
+      "binaryDir": "${sourceDir}/build/linux-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     },
     {
       "name": "linux-release",
-      "inherits": "release"
+      "inherits": "vcpkg-release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     },
     {
       "name": "macos-qt",
@@ -83,12 +137,20 @@
       "configurePreset": "release"
     },
     {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug"
+    },
+    {
       "name": "windows-release",
       "configurePreset": "windows-release"
     },
     {
       "name": "macos-release",
       "configurePreset": "macos-release"
+    },
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug"
     },
     {
       "name": "linux-release",
@@ -116,6 +178,13 @@
       }
     },
     {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "windows-release",
       "configurePreset": "windows-release",
       "output": {
@@ -125,6 +194,13 @@
     {
       "name": "macos-release",
       "configurePreset": "macos-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug",
       "output": {
         "outputOnFailure": true
       }

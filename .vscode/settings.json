@@ -4,5 +4,6 @@
   "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
   "lldb.adapterEnv": {
     "LLDB_DEBUGSERVER_PATH": "/Library/Developer/CommandLineTools/Library/PrivateFrameworks/LLDB.framework/Versions/A/Resources/debugserver"
-  }
+  },
+  "cmake.useVsDeveloperEnvironment": "never"
 }

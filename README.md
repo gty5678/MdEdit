@@ -2,18 +2,18 @@
 
 基于 Qt 6 / C++17 / CMake / Ninja 的单文档 Markdown 编辑器，使用 vcpkg 管理依赖，支持 Windows、macOS 和 Linux 构建。
 
-界面顶部提供“打开 / 保存 / Live 编辑”。默认在同一文档区域直接编辑：光标进入段落时显示该段 Markdown 源码，离开后恢复排版与公式。空行分隔编辑段，代码块和多行公式保持完整。Ctrl+E 可切换为全文源码编辑。
+打开文件后，界面顶部提供“Live 编辑”切换按钮。默认在同一文档区域直接编辑：光标进入段落时显示该段 Markdown 源码，离开后恢复排版与公式。空行分隔编辑段，代码块和多行公式保持完整。Ctrl+E 可切换为全文源码编辑。
 
 ## 使用
 
-Windows 打包后运行 `dist/windows/bin/MdEdit.exe`。直接输入文字，或按 Ctrl+O 打开 Markdown 文件。
+Windows 打包后运行 `dist/windows/bin/MdEdit.exe`。在启动页点击“打开”，或按 Ctrl+O 选择 Markdown 文件。
 
-- Ctrl+O：打开文件
-- Ctrl+S：保存
-- Ctrl+Shift+S：另存为
-- Ctrl+E：切换 Live / 全文源码编辑
+- Ctrl+E：切换 Live / 全文源码编辑，保留光标位置和选区方向。
+- Live 模式中，Enter 自动延续无序列表、有序列表和任务列表；新任务默认未勾选，空列表项按 Enter 退出列表。
+- Shift+Enter 仅插入换行；代码围栏和多行公式中 Enter 也仅插入换行。
+- Live 模式中，代码块在非编辑状态将围栏行留空，点击后显示完整源码；围栏行始终保留高度，切换时排版不跳动。支持 C/C++、Python、JavaScript/TypeScript、JSON、Shell 和 LaTeX 的基础语法高亮；未标注或未知语言以等宽字体显示。
 
-采用 UTF-8、原子文件保存，打开其他文件或退出前会询问是否保存修改。也可通过命令行参数打开文件。支持 Markdown 标题、列表、表格、代码块和相对路径图片。
+停止输入片刻后，修改会以 UTF-8 原子写回原文件。关闭窗口时会立即保存尚未写入的修改。也可通过命令行参数打开文件。支持 Markdown 标题、列表、表格、代码块和相对路径图片。
 
 ## 数学公式
 
@@ -35,16 +35,27 @@ $$
 
 ## 构建
 
-需要 Git、CMake 3.24+、Ninja 和 C++17 编译器。所有第三方依赖由根目录 `vcpkg.json` 管理，registry baseline 固定版本；Qt 最低支持 6.5，实际版本由 baseline 决定，不再要求本机安装 Qt 6.12.0。
+需要 Git、CMake 3.24+、Ninja 和 C++17 编译器。Qt 最低要求 6.12.0。当前 vcpkg baseline 提供 Qt 6.11.3，使用该 baseline 的 Windows、macOS 和 Linux 预设暂时无法满足版本要求。macOS 可使用下文的本机 Qt 6.12.0 预设。
 
 先按 [vcpkg 官方说明](https://learn.microsoft.com/vcpkg/get_started/get-started) 安装并 bootstrap vcpkg，将环境变量 `VCPKG_ROOT` 指向该目录。首次配置会下载并编译 Qt 等依赖，耗时和磁盘占用较大；后续使用 vcpkg 缓存。
 
-Windows：安装 Visual Studio 的“使用 C++ 的桌面开发”，打开 **x64 Native Tools Command Prompt**：
+### Windows（x64 / VS Code）
 
-```bat
-set "VCPKG_ROOT=C:\dev\vcpkg"
-build.cmd
+安装 VS Code 和 [MSYS2](https://www.msys2.org/)。在 **MSYS2 MINGW64** 终端安装工具链：
+
+```bash
+pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
 ```
+
+将 MSYS2 的 `mingw64\bin`（默认 `C:\msys64\mingw64\bin`）加入 Windows 用户 `Path`，并将 `VCPKG_ROOT` 设为已运行 `bootstrap-vcpkg.bat` 的 vcpkg 目录。重新打开 VS Code，安装工作区推荐扩展。Windows 的编译、调试与打包均通过 MinGW-w64 工具链完成，无需安装 Visual Studio 或其 Build Tools。vcpkg 的目标和宿主 triplet 均为 `x64-mingw-dynamic`，依赖与应用使用同一工具链。
+
+- 按 F5，选择 `MdEdit Debug (Windows / Linux)` 自动配置、编译并启动 GDB 调试。
+- 按 Ctrl+Shift+B 构建 Debug。通过“任务：运行任务”可选 `CMake: Build Release` 或 `MdEdit: Run without debugger`。
+- 运行任务 `MdEdit: Package Windows`，或在 VS Code 集成终端执行 `.\build.cmd`。脚本会构建 Release、运行冒烟测试并安装到 `dist/windows`。
+
+Windows 使用 `build/windows-debug` 和 `build/windows-release`，共用 `build/windows-deps/vcpkg_installed`。已有的旧版 Windows 构建缓存可以留在原目录，新预设会在独立目录重新配置。需要清除新预设缓存时，在 CMake Tools 中运行“Delete Cache and Reconfigure”，或执行 `cmake --fresh --preset windows-release`。
+
+### macOS 和 Linux
 
 macOS：安装 Xcode Command Line Tools、CMake 和 Ninja：
 
@@ -70,18 +81,11 @@ export VCPKG_ROOT="$HOME/vcpkg"
 bash build-linux.sh
 ```
 
-通用命令（三个平台一致）：
+各平台的 vcpkg Release 预设为 `windows-release`、`macos-release` 和 `linux-release`。macOS 和 Linux 的 Release 构建目录是 `build-vcpkg`。更换 triplet 或编译器时请使用新的构建目录。使用 vcpkg 预设时，应清除此前为官方 Qt kit 设置的 `Qt6_DIR` 或 `CMAKE_PREFIX_PATH`。
 
-```bash
-cmake --preset release
-cmake --build --preset release --parallel
-ctest --preset release
-cmake --install build-vcpkg --prefix dist/local
-```
+Linux 可在 VS Code 里用 `MdEdit Debug (Windows / Linux)` 调试，系统需安装 GDB，并设置好 `VCPKG_ROOT`。Debug 使用 `linux-debug` 预设，产物位于 `build/linux-debug`。
 
-`windows-release`、`macos-release`、`linux-release` 是同一配置的别名。构建产物位于 `build-vcpkg`，避免复用旧构建缓存。可在配置命令后传入 `-DVCPKG_TARGET_TRIPLET=arm64-osx` 等参数；更换 triplet、编译器后请使用新构建目录。使用 vcpkg 预设时不要混用官方 Qt kit 和 vcpkg Qt；清除旧的 `Qt6_DIR`、`CMAKE_PREFIX_PATH` 设置。
-
-Windows/macOS 测试使用原生平台插件，Linux 使用 offscreen 插件（测试无需显示服务器）；覆盖编辑操作、行内公式、分式、积分、矩阵与代码区域保护，生成 `build-vcpkg/math-smoke.png`。macOS/Linux 仍需在对应系统执行构建、测试和 GUI 检查。Linux 安装目录包含资源与许可证，但不保证可跨发行版直接运行；Qt 的运行依赖部署支持取决于该 Qt 版本和系统。
+Windows/macOS 测试使用原生平台插件，Linux 使用 offscreen 插件（无需显示服务器）。测试覆盖编辑操作、行内公式、分式、积分、矩阵与代码区域保护，在对应构建目录生成 `math-smoke.png`。Linux 安装目录包含资源与许可证，运行依赖的部署支持取决于 Qt 版本和系统。
 
 ## VS Code（本机 Windows x64 / Qt 6.12.0）
 
@@ -93,8 +97,8 @@ Windows/macOS 测试使用原生平台插件，Linux 使用 offscreen 插件（�
 
 已在 `.vscode/settings.json` 为 CodeLLDB 配置 Command Line Tools 自带的 `debugserver` 路径。已配置 CMake Tools、C/C++ 和 CodeLLDB 扩展推荐；本机已安装这些扩展。使用 VS Code 打开项目根目录后：
 
-- 打开“运行和调试”，选择 `MdEdit Debug`，按 F5 自动配置、编译并启动调试，可在 `src/main.cpp` 设置断点。
-- 选择 `MdEdit Release`，按 F5 构建并启动 Release；优化后的代码可能无法逐行调试。按 Ctrl+F5 可直接运行。
+- 打开“运行和调试”，选择 `MdEdit Debug (macOS)`，按 F5 自动配置、编译并启动调试，可在 `src/main.cpp` 设置断点。
+- 选择 `MdEdit Release (macOS)`，按 F5 构建并启动 Release；优化后的代码可能无法逐行调试。按 Ctrl+F5 可直接运行。
 - 按 Cmd+Shift+B 默认构建 Debug；通过“任务：运行任务”选择 `CMake: Build Release` 可只构建 Release。
 - CMake Tools 的配置预设选择 `macos-qt-debug` 或 `macos-qt-release`，分别使用独立构建目录 `build/macos-qt-debug`、`build/macos-qt-release`。
 
@@ -117,4 +121,4 @@ ctest --preset macos-qt-debug
 
 字体资源从 vcpkg 安装目录部署到可执行文件旁的 `res`（macOS 为 `Contents/Resources/res`）；依赖许可证复制到 `licenses`。升级依赖请运行 `vcpkg x-update-baseline` 并重新验证。升级 MicroTeX 时需同时更新提交、SHA512 和兼容补丁。
 
-项目在 `vcpkg-configuration.json` 中明确使用官方 Git registry（`https://github.com/Microsoft/vcpkg`），并固定 baseline，避免本机针对小写组织名 URL 的镜像重定向导致 `not our ref`。需要能访问 GitHub；若仍失败，查看 `build-vcpkg/vcpkg-manifest-install.log`，不要移除版本锁定。Visual Studio 中修改配置后请执行“删除缓存并重新配置”；命令行可执行 `cmake --fresh --preset windows-release`。
+项目在 `vcpkg-configuration.json` 中明确使用官方 Git registry（`https://github.com/Microsoft/vcpkg`），并固定 baseline，避免本机针对小写组织名 URL 的镜像重定向导致 `not our ref`。需要能访问 GitHub；若仍失败，查看 `build-vcpkg/vcpkg-manifest-install.log`，不要移除版本锁定。
