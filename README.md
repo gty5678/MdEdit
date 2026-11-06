@@ -49,9 +49,12 @@ build.cmd
 macOS：安装 Xcode Command Line Tools、CMake 和 Ninja：
 
 ```bash
+brew install cmake ninja autoconf autoconf-archive automake libtool
 export VCPKG_ROOT="$HOME/vcpkg"
 bash build-macos.sh
 ```
+
+如果项目目录内已有 bootstrap 完成的 `.vcpkg`，脚本会自动使用它，无需设置 `VCPKG_ROOT`。
 
 生成 `dist/macos/MdEdit.app` 和 `dist/macos/MdEdit.dmg`，并从临时目录运行打包后的冒烟测试。默认使用当前机器架构；切换架构时应使用新的构建目录，并匹配 vcpkg triplet。应用未签名、公证。
 
@@ -76,9 +79,29 @@ ctest --preset release
 cmake --install build-vcpkg --prefix dist/local
 ```
 
-`windows-release`、`macos-release`、`linux-release` 是同一配置的别名。构建产物位于 `build-vcpkg`，避免复用旧构建缓存。可在配置命令后传入 `-DVCPKG_TARGET_TRIPLET=arm64-osx` 等参数；更换 triplet、编译器后请使用新构建目录。不要混用官方 Qt kit 和 vcpkg Qt；清除旧的 `Qt6_DIR`、`CMAKE_PREFIX_PATH` 设置。
+`windows-release`、`macos-release`、`linux-release` 是同一配置的别名。构建产物位于 `build-vcpkg`，避免复用旧构建缓存。可在配置命令后传入 `-DVCPKG_TARGET_TRIPLET=arm64-osx` 等参数；更换 triplet、编译器后请使用新构建目录。使用 vcpkg 预设时不要混用官方 Qt kit 和 vcpkg Qt；清除旧的 `Qt6_DIR`、`CMAKE_PREFIX_PATH` 设置。
 
 Windows/macOS 测试使用原生平台插件，Linux 使用 offscreen 插件（测试无需显示服务器）；覆盖编辑操作、行内公式、分式、积分、矩阵与代码区域保护，生成 `build-vcpkg/math-smoke.png`。macOS/Linux 仍需在对应系统执行构建、测试和 GUI 检查。Linux 安装目录包含资源与许可证，但不保证可跨发行版直接运行；Qt 的运行依赖部署支持取决于该 Qt 版本和系统。
+
+## VS Code（本机 macOS / Qt 6.12.0）
+
+已在 `.vscode/settings.json` 为 CodeLLDB 配置 Command Line Tools 自带的 `debugserver` 路径。已配置 CMake Tools、C/C++ 和 CodeLLDB 扩展推荐；本机已安装这些扩展。使用 VS Code 打开项目根目录后：
+
+- 打开“运行和调试”，选择 `MdEdit Debug`，按 F5 自动配置、编译并启动调试，可在 `src/main.cpp` 设置断点。
+- 选择 `MdEdit Release`，按 F5 构建并启动 Release；优化后的代码可能无法逐行调试。按 Ctrl+F5 可直接运行。
+- 按 Cmd+Shift+B 默认构建 Debug；通过“任务：运行任务”选择 `CMake: Build Release` 可只构建 Release。
+- CMake Tools 的配置预设选择 `macos-qt-debug` 或 `macos-qt-release`，分别使用独立构建目录 `build/macos-qt-debug`、`build/macos-qt-release`。
+
+这两个预设使用 `$HOME/Qt/6.12.0/macos` 和本次已准备的 `build-local/qt612-deps`（使用同一官方 Qt 重新编译的 MicroTeX），tinyxml2 来自 `build-vcpkg/vcpkg_installed/arm64-osx`。这些依赖目录需要保留；换机器或删除依赖后需要重新准备。它们与原有 vcpkg 构建预设使用不同的构建目录。
+
+也可在终端执行：
+
+```bash
+cmake --preset macos-qt-debug
+cmake --build --preset macos-qt-debug --parallel
+ctest --preset macos-qt-debug
+# Release 将上述预设名替换为 macos-qt-release
+```
 
 ## 第三方依赖
 

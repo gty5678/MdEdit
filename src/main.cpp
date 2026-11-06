@@ -147,13 +147,77 @@ static int renderMarkdown(QTextBrowser *view,const QString &source,QStringList &
     return rendered;
 }
 
-// The source remains authoritative; only the paragraph under the caret is exposed.
-class LiveEditor : public QTextBrowser {
-    struct Region { int sourceStart, sourceEnd, start, end; };
+// Keep line numbers outside the document so they never enter copied/saved text.
+class LineNumberArea : public QWidget {
+public:
+    std::function<void(QPaintEvent *)> paint;
+    explicit LineNumberArea(QWidget *parent):QWidget(parent){setObjectName("lineNumberArea");setAttribute(Qt::WA_TransparentForMouseEvents);}
+protected:
+    void paintEvent(QPaintEvent *event)override{if(paint)paint(event);}
+};
+
+template<class Base> class NumberedEditor : public Base {
+    LineNumberArea *numbers=new LineNumberArea(this);
+    int gutterWidth=0;
+public:
+    NumberedEditor(){
+        numbers->paint=[this](QPaintEvent *event){paintNumbers(event);};
+        QObject::connect(this,&Base::textChanged,this,[this]{refreshLineNumbers();});
+        QObject::connect(this->verticalScrollBar(),&QScrollBar::valueChanged,this,[this]{numbers->update();});
+        QObject::connect(this,&Base::cursorPositionChanged,this,[this]{numbers->update();});
+        QObject::connect(this->document()->documentLayout(),&QAbstractTextDocumentLayout::update,this,[this]{numbers->update();});
+        refreshLineNumbers();
+    }
+    int lineNumberForBlock(const QTextBlock &block)const{return lineNumberAt(QTextCursor(block));}
+    virtual int lineNumberAt(const QTextCursor &cursor)const{return cursor.blockNumber()+1;}
+    virtual int sourceLineCount()const{return this->document()->blockCount();}
+    void refreshLineNumbers(){
+        QFontMetrics metrics(QFont(editorFont,10));
+        int width=24+metrics.horizontalAdvance(QString::number(qMax(1,sourceLineCount())));
+        if(width!=gutterWidth){gutterWidth=width;this->setViewportMargins(width,0,0,0);}
+        const auto area=this->contentsRect();numbers->setGeometry(area.left(),area.top(),width,area.height());
+        numbers->update();
+    }
+protected:
+    void resizeEvent(QResizeEvent *event)override{Base::resizeEvent(event);refreshLineNumbers();}
+private:
+    void paintNumbers(QPaintEvent *event){
+        QPainter painter(numbers);painter.fillRect(event->rect(),QColor("#202027"));
+        painter.setFont(QFont(editorFont,10));
+        const int current=lineNumberAt(this->textCursor());
+        auto block=this->cursorForPosition(QPoint(0,0)).block();int previous=-1;
+        while(block.isValid()){
+            QTextCursor cursor(block);const auto rect=this->cursorRect(cursor);
+            if(rect.top()>this->viewport()->height())break;
+            const QString text=block.text();
+            for(int start=0;;){
+                cursor.setPosition(block.position()+start);
+                const auto lineRect=this->cursorRect(cursor);
+                if(lineRect.top()>this->viewport()->height())break;
+                const int number=lineNumberAt(cursor);
+                if(lineRect.bottom()>=0&&number>0&&number!=previous){
+                    painter.setPen(number==current?QColor("#c3b0fa"):QColor("#777180"));
+                    painter.drawText(QRect(0,lineRect.top(),gutterWidth-10,qMax(lineRect.height(),painter.fontMetrics().height())),
+                        Qt::AlignRight|Qt::AlignVCenter,QString::number(number));
+                    previous=number;
+                }
+                const int separator=text.indexOf(QChar::LineSeparator,start);
+                if(separator<0)break;
+                start=separator+1;
+            }
+            block=block.next();
+        }
+    }
+};
+
+// The source remains authoritative; inline editing exposes just the active span.
+class LiveEditor : public NumberedEditor<QTextBrowser> {
+    struct Region { int sourceStart, sourceEnd, start, end, contentEnd=-1; bool inlinePart=false; };
     QList<Region> regions;
     QString source;
     int active=-1;
     bool rebuilding=false;
+    bool movingCursor=false;
     QString oldText;
 public:
     std::function<void(const QString &)> sourceChanged;
@@ -161,62 +225,171 @@ public:
     explicit LiveEditor(){
         setReadOnly(false);setAcceptRichText(false);setUndoRedoEnabled(false);setAcceptDrops(false);setContextMenuPolicy(Qt::NoContextMenu);
         connect(this,&QTextEdit::cursorPositionChanged,this,[this]{
-            if(rebuilding||textCursor().hasSelection())return;
-            int pos=textCursor().position();
-            for(int i=0;i<regions.size();++i)if(pos>=regions[i].start&&pos<=regions[i].end){
-                if(i!=active)rebuild(i,qMin(pos-regions[i].start,regions[i].sourceEnd-regions[i].sourceStart));
-                break;
-            }
+            // Cursor signals can arrive before textChanged during a multiline edit.
+            // Wait for source/region offsets to catch up before switching units.
+            if(rebuilding||movingCursor||textCursor().hasSelection()||toPlainText()!=oldText)return;
+            activateCaretRegion();
         });
         connect(this,&QTextEdit::textChanged,this,[this]{
             if(rebuilding||active<0)return;
-            QString now=toPlainText();int a=0,b=oldText.size(),c=now.size();
+            const QString now=toPlainText();
+            auto &r=regions[active];
+            const int delta=now.size()-oldText.size();
+            // Equal separators outside the editable region can otherwise
+            // absorb a newly inserted newline during the prefix scan.
+            int a=r.start,b=r.end,c=r.end+delta;
             while(a<b&&a<c&&oldText[a]==now[a])++a;
             while(b>a&&c>a&&oldText[b-1]==now[c-1]){--b;--c;}
-            auto &r=regions[active];
             source.replace(r.sourceStart+a-r.start,b-a,now.mid(a,c-a));
-            int delta=c-b;r.sourceEnd+=delta;r.end+=delta;
-            for(int i=active+1;i<regions.size();++i){regions[i].sourceStart+=delta;regions[i].sourceEnd+=delta;regions[i].start+=delta;regions[i].end+=delta;}
-            oldText=now;if(sourceChanged)sourceChanged(source);
+            r.sourceEnd+=delta;r.end+=delta;if(r.contentEnd>=0)r.contentEnd+=delta;
+            for(int i=active+1;i<regions.size();++i){regions[i].sourceStart+=delta;regions[i].sourceEnd+=delta;if(regions[i].contentEnd>=0)regions[i].contentEnd+=delta;regions[i].start+=delta;regions[i].end+=delta;}
+            oldText=now;styleActiveSource();refreshLineNumbers();if(sourceChanged)sourceChanged(source);
         });
     }
     void setSource(const QString &text){if(text==source&&!regions.isEmpty())return;source=text;rebuild(-1,0);}
     QString markdown()const{return source;}
-    void rebuild(int chosen,int offset){
+    int sourceLineCount()const override{return source.count('\n')+1;}
+    int lineNumberAt(const QTextCursor &cursor)const override{
+        return source.left(sourcePosition(cursor.position())).count('\n')+1;
+    }
+    void rebuild(int chosen,int offset,int forcedTarget=-1){
         rebuilding=true;int scroll=verticalScrollBar()->value();
-        // Blank lines delimit editing units, except within fenced code and formulas.
-        auto spans=scanSpans(source);QList<QPair<int,int>> units;int begin=0;
-        auto matches=QRegularExpression("\\n[ \\t]*\\n").globalMatch(source);
+        const int caretY=cursorRect().top();
+        // Give each source blank line its own editable block. Keep fenced
+        // code and display formulas intact for their respective renderers.
+        const auto spans=scanSpans(source);
+        QList<QPair<int,int>> units;
+        int begin=0;
+        static const QRegularExpression blankLine("(?:^|(?<=\\n))[ \\t]*\\n");
+        auto matches=blankLine.globalMatch(source);
         while(matches.hasNext()){
-            auto m=matches.next();int cut=m.capturedEnd();bool protectedSpan=false;
-            for(const auto &span:spans)if(m.capturedStart()>=span.start&&m.capturedStart()<span.start+span.length){protectedSpan=true;break;}
-            if(!protectedSpan){units.append({begin,cut});begin=cut;}
+            const auto match=matches.next();
+            const int start=match.capturedStart();
+            bool protectedSpan=false;
+            for(const auto &span:spans){
+                if(span.start>start)break;
+                if(start<span.start+span.length){protectedSpan=true;break;}
+            }
+            if(protectedSpan)continue;
+            if(begin<start)units.append({begin,start});
+            units.append({start,match.capturedEnd()});
+            begin=match.capturedEnd();
         }
-        units.append({begin,int(source.size())});
+        if(begin<source.size())units.append({begin,int(source.size())});
+        if(source.isEmpty()||source.endsWith('\n'))units.append({int(source.size()),int(source.size())});
         // Recover chosen unit by source position after edits changed the boundaries.
-        int target=chosen>=0&&chosen<regions.size()?regions[chosen].sourceStart+offset:-1;
+        int target=forcedTarget>=0?forcedTarget:(chosen>=0&&chosen<regions.size()?regions[chosen].sourceStart+offset:-1);
         active=-1;regions.clear();document()->clear();QTextCursor out(document());
-        for(const auto &unit:units){
-            int i=regions.size();bool editing=target>=unit.first&&(target<unit.second||unit.second==source.size())&&active<0;
-            if(i)out.insertBlock();int from=out.position();
+        for(qsizetype unitIndex=0;unitIndex<units.size();++unitIndex){
+            const auto &unit=units[unitIndex];
+            int i=regions.size();bool editing=target>=unit.first&&(target<unit.second||unitIndex==units.size()-1)&&active<0;
+            if(i)out.insertBlock(QTextBlockFormat(),QTextCharFormat());int from=out.position();
             QString text=source.mid(unit.first,unit.second-unit.first);
-            if(editing){active=i;QTextCharFormat f;f.setFont(QFont(editorFont,13));out.setBlockFormat(QTextBlockFormat());out.insertText(text,f);}
-            else{
+            // The boundary between units already inserts one newline.
+            if(text.endsWith('\n'))text.chop(1);
+            const int contentEnd=unit.first+text.size();
+            const auto pieces=inlinePieces(text);
+            if(!pieces.isEmpty()){
+                QTextDocument body;body.setMarkdown("Body");
+                out.setBlockFormat(body.begin().blockFormat());
+                QTextCharFormat normal;normal.setFont(font());
+                int begin=0;
+                for(const auto &piece:pieces){
+                    const int end=piece.first;
+                    const int start=out.position();
+                    const bool selected=editing&&target>=unit.first+begin&&
+                        (target<unit.first+end||end==text.size());
+                    const QString raw=text.mid(begin,end-begin);
+                    if(selected||!piece.second){
+                        if(selected)active=regions.size();
+                        QString displayed=raw;
+                        displayed.replace('\n',QChar::LineSeparator);
+                        out.insertText(displayed,normal);
+                    }else{
+                        QTextBrowser rendered;rendered.setFont(font());QStringList errors;
+                        renderMarkdown(&rendered,raw,errors);
+                        for(auto it=rendered.document()->begin().begin();!it.atEnd();++it){
+                            const auto fragment=it.fragment();
+                            auto format=fragment.charFormat();
+                            if(format.isImageFormat()){
+                                const QUrl url(format.toImageFormat().name());
+                                document()->addResource(QTextDocument::ImageResource,url,
+                                    rendered.document()->resource(QTextDocument::ImageResource,url));
+                            }
+                            out.insertText(fragment.text(),format);
+                        }
+                    }
+                    regions.append({unit.first+begin,end==text.size()?unit.second:unit.first+end,
+                        start,out.position(),unit.first+end,true});
+                    begin=end;
+                }
+                continue;
+            }
+            if(editing){
+                active=i;QTextCharFormat f;f.setFont(font());out.setBlockFormat(QTextBlockFormat());out.insertText(text,f);
+            }else if(text.trimmed().isEmpty()){
+                QTextCharFormat f;f.setFont(font());out.setBlockCharFormat(f);
+            }else{
                 QTextBrowser rendered;rendered.setFont(font());rendered.document()->setBaseUrl(document()->baseUrl());QStringList errors;
-                renderMarkdown(&rendered,text,errors);
+                // Keep soft source breaks visible in ordinary paragraphs so
+                // entering edit mode doesn't unfold them into extra rows.
+                QString layoutText=text;
+                const bool joinedParagraph=isMultilineParagraph(text);
+                if(joinedParagraph)layoutText.replace("\n","  \n");
+                renderMarkdown(&rendered,layoutText,errors);
                 for(auto block=rendered.document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
                     auto format=it.fragment().charFormat();if(format.isImageFormat()){
                         QUrl url(format.toImageFormat().name());document()->addResource(QTextDocument::ImageResource,url,rendered.document()->resource(QTextDocument::ImageResource,url));
                     }
                 }
+                if(joinedParagraph){
+                    for(auto block=rendered.document()->begin();block.isValid();block=block.next()){
+                        auto format=block.blockFormat();
+                        if(block.previous().isValid())format.setTopMargin(0);
+                        if(block.next().isValid())format.setBottomMargin(0);
+                        QTextCursor(block).setBlockFormat(format);
+                    }
+                }
                 out.insertFragment(QTextDocumentFragment(rendered.document()));
+                // Qt can keep the destination block format for the first
+                // paragraph of a fragment inserted into an empty block.
+                QTextCursor first(document()->findBlock(from));
+                const auto format=rendered.document()->begin().blockFormat();
+                if(format.objectIndex()<0&&first.blockFormat().objectIndex()<0)
+                    first.setBlockFormat(format);
             }
-            regions.append({unit.first,unit.second,from,out.position()});
+            regions.append({unit.first,unit.second,from,out.position(),contentEnd});
         }
+        styleActiveSource();
         if(target>=0&&active>=0){QTextCursor caret(document());caret.setPosition(regions[active].start+qBound(0,target-regions[active].sourceStart,regions[active].end-regions[active].start));setTextCursor(caret);}
-        oldText=toPlainText();verticalScrollBar()->setValue(scroll);rebuilding=false;
+        oldText=toPlainText();verticalScrollBar()->setValue(scroll);
+        if(target>=0)verticalScrollBar()->setValue(scroll+cursorRect().top()-caretY);
+        rebuilding=false;refreshLineNumbers();
     }
 protected:
+    void mousePressEvent(QMouseEvent *event)override{
+        int formulaRegion=-1;
+        if(event->button()==Qt::LeftButton&&event->modifiers()==Qt::NoModifier){
+            const auto point=event->position().toPoint();
+            const int hit=cursorForPosition(point).position();
+            for(int pos:{hit,hit-1}){
+                if(pos<0||pos>=oldText.size()||oldText[pos]!=QChar::ObjectReplacementCharacter)continue;
+                const int region=regionAt(pos);
+                if(region<0||!regions[region].inlinePart)continue;
+                QTextCursor edge(document());edge.setPosition(pos);
+                const auto left=cursorRect(edge);
+                edge.setPosition(pos+1);
+                const auto right=cursorRect(edge);
+                if(left.united(right).contains(point)){formulaRegion=region;break;}
+            }
+        }
+        {
+            QScopedValueRollback<bool> guard(movingCursor,true);
+            QTextBrowser::mousePressEvent(event);
+        }
+        if(formulaRegion>=0)rebuild(formulaRegion,0);
+        else activateCaretRegion();
+    }
     void focusInEvent(QFocusEvent *event)override{
         QTextBrowser::focusInEvent(event);
         if(active<0&&!regions.isEmpty())rebuild(0,0);
@@ -226,39 +399,193 @@ protected:
         if(active>=0)rebuild(-1,0);
     }
     void keyPressEvent(QKeyEvent *event)override{
-        if(event->matches(QKeySequence::Undo)||event->matches(QKeySequence::Redo)){if(history)history(event->matches(QKeySequence::Redo));return;}
-        if(active<0){int pos=textCursor().position();for(int i=0;i<regions.size();++i)if(pos>=regions[i].start&&pos<=regions[i].end){rebuild(i,0);break;}}
+        const bool newline=event->key()==Qt::Key_Return||event->key()==Qt::Key_Enter;
+        if(newline&&!(event->modifiers()&~Qt::KeypadModifier)){
+            const auto cursor=textCursor();
+            const bool all=cursor.hasSelection()&&cursor.selectionStart()==0&&
+                cursor.selectionEnd()==document()->characterCount()-1;
+            const int start=all?0:sourcePosition(cursor.selectionStart());
+            const int end=all?int(source.size()):sourcePosition(cursor.selectionEnd());
+            source.replace(start,qMax(0,end-start),"\n");
+            rebuild(-1,0,start+1);
+            if(sourceChanged)sourceChanged(source);
+            event->accept();
+            return;
+        }
+        if(event->matches(QKeySequence::Undo)||event->matches(QKeySequence::Redo)){int at=sourcePosition(textCursor().position());
+            if(history)history(event->matches(QKeySequence::Redo));
+            for(int i=0;i<regions.size();++i)if(at>=regions[i].sourceStart&&(at<=regions[i].sourceEnd)){
+                rebuild(i,at-regions[i].sourceStart);break;
+            }
+            return;}
+        if(active<0)activateCaretRegion();
         if(active<0){event->ignore();return;}
         if(!textCursor().hasSelection()){
             int pos=textCursor().position();
-            if(event->key()==Qt::Key_Backspace&&pos==regions[active].start&&active>0){int previous=active-1;rebuild(previous,regions[previous].sourceEnd-regions[previous].sourceStart);return;}
-            if(event->key()==Qt::Key_Delete&&pos==regions[active].end&&active+1<regions.size()){rebuild(active+1,0);return;}
+            if(event->key()==Qt::Key_Backspace&&pos==regions[active].start&&active>0){int at=sourcePosition(pos);exposeSource(at,at);}
+            if(event->key()==Qt::Key_Delete&&pos==regions[active].end&&active+1<regions.size()){int at=sourcePosition(pos);exposeSource(at,at);}
         }
-        // A selection spanning rendered regions is expanded to source before editing.
-        if(textCursor().hasSelection()&&(textCursor().selectionStart()<regions[active].start||textCursor().selectionEnd()>regions[active].end)){
-            auto sourcePosition=[this](int pos){
-                for(int i=0;i<regions.size();++i){const auto &r=regions[i];if(pos>=r.start&&pos<=r.end){
-                    if(i==active)return r.sourceStart+pos-r.start;
-                    if(pos==r.end)return r.sourceEnd;
-                    QString visible=toPlainText().mid(r.start,pos-r.start);int at=r.sourceStart;
-                    for(QChar ch:visible){
-                        if(ch==QChar::ObjectReplacementCharacter){for(const auto &span:scanSpans(source))if(span.start>=at&&span.kind!=SpanKind::Code){at=span.start+span.length;break;}continue;}
-                        int found=source.indexOf(ch,at);if(found>=0&&found<r.sourceEnd)at=found+1;
-                    }
-                    return at;
-                }}return int(source.size());
-            };
-            int begin=sourcePosition(textCursor().selectionStart()),end=sourcePosition(textCursor().selectionEnd());
-            rebuilding=true;setPlainText(source);regions={{0,int(source.size()),0,int(source.size())}};active=0;oldText=source;
-            QTextCursor selected(document());selected.setPosition(begin);selected.setPosition(end,QTextCursor::KeepAnchor);setTextCursor(selected);rebuilding=false;
+        if(newline||event->key()==Qt::Key_Backspace||event->key()==Qt::Key_Delete||
+           event->matches(QKeySequence::Cut)||event->matches(QKeySequence::Paste)||
+           (!event->text().isEmpty()&&!(event->modifiers()&(Qt::ControlModifier|Qt::MetaModifier))))prepareSelection();
+        {
+            // QTextControl still uses the old document positions until its key
+            // handler returns. Rebuild only after that movement has finished.
+            QScopedValueRollback<bool> guard(movingCursor,true);
+            if(newline)QTextEdit::keyPressEvent(event);
+            else QTextBrowser::keyPressEvent(event);
         }
-        QTextBrowser::keyPressEvent(event);
+        if(toPlainText()==oldText)activateCaretRegion();
     }
-    void insertFromMimeData(const QMimeData *mime)override{insertPlainText(mime->text());}
+    void insertFromMimeData(const QMimeData *mime)override{prepareSelection();insertPlainText(mime->text());}
+    void inputMethodEvent(QInputMethodEvent *event)override{
+        prepareSelection();
+        QTextBrowser::inputMethodEvent(event);
+    }
+private:
+    int regionAt(int pos)const{
+        // At an inline boundary the following span owns the caret.
+        for(int i=0;i<regions.size();++i){
+            const auto &r=regions[i];
+            if(pos<r.start||pos>r.end)continue;
+            if(pos==r.end&&i+1<regions.size()&&regions[i+1].start==pos)continue;
+            return i;
+        }
+        return -1;
+    }
+    void activateCaretRegion(){
+        const auto caret=textCursor();
+        if(caret.hasSelection())return;
+        const int i=regionAt(caret.position());
+        if(i>=0&&i!=active)rebuild(i,sourcePosition(caret.position())-regions[i].sourceStart);
+    }
+    static QList<QPair<int,bool>> inlinePieces(const QString &text){
+        // Use independent inline spans only where they don't change the
+        // surrounding Markdown structure. Complex blocks use the full parser.
+        if(text.startsWith(' ')||text.startsWith('\t'))return {};
+        if(text.contains('\n')&&!isMultilineParagraph(text))return {};
+        QList<QPair<int,int>> tokens;
+        for(const auto &span:scanSpans(text)){
+            if(span.kind!=SpanKind::InlineMath)return {};
+            tokens.append({span.start,span.start+span.length});
+        }
+        static const QRegularExpression strong(R"((?<![\\*])\*\*([^*\n]+)\*\*(?!\*))");
+        auto matches=strong.globalMatch(text);
+        while(matches.hasNext()){
+            const auto match=matches.next();
+            const auto inner=match.captured(1);
+            if(inner.front().isSpace()||inner.back().isSpace())return {};
+            tokens.append({match.capturedStart(),match.capturedEnd()});
+        }
+        if(tokens.isEmpty())return {};
+        std::sort(tokens.begin(),tokens.end());
+        static const QRegularExpression otherMarkup(R"([#>*_`~\[\]<&\\$]|^[-+ ]|^\d+[.)] )");
+        QList<QPair<int,bool>> pieces;
+        int at=0;
+        for(const auto &token:tokens){
+            if(token.first<at)return {};
+            if(token.first>at){
+                if(otherMarkup.match(text.mid(at,token.first-at)).hasMatch()&&
+                    (at==0||otherMarkup.match(text.mid(at,token.first-at).trimmed()).hasMatch()))return {};
+                pieces.append({token.first,false});
+            }
+            pieces.append({token.second,true});
+            at=token.second;
+        }
+        if(at<text.size()){
+            if(otherMarkup.match(text.mid(at).trimmed()).hasMatch())return {};
+            pieces.append({text.size(),false});
+        }
+        return pieces;
+    }
+    static bool isMultilineParagraph(const QString &text){
+        if(!text.contains('\n'))return false;
+        for(const auto &span:scanSpans(text))
+            if(span.kind==SpanKind::DisplayMath||text.mid(span.start,span.length).contains('\n'))return false;
+        // A terminal backslash is already a Markdown hard break.
+        if(text.contains("\\\n"))return false;
+        QTextDocument reference;reference.setMarkdown(text);
+        const auto block=reference.begin();
+        const auto format=block.blockFormat();
+        return reference.blockCount()==1&&!block.textList()&&!format.headingLevel()&&
+            !format.indent()&&!format.hasProperty(QTextFormat::BlockCodeLanguage)&&
+            !format.hasProperty(QTextFormat::BlockQuoteLevel)&&!format.hasProperty(QTextFormat::BlockTrailingHorizontalRulerWidth);
+    }
+    void styleActiveSource(){
+        if(active<0||regions[active].inlinePart)return;
+        QScopedValueRollback<bool> guard(rebuilding,true);
+        const auto &region=regions[active];
+        const auto spans=scanSpans(source);
+        const bool joinedParagraph=isMultilineParagraph(source.mid(region.sourceStart,region.end-region.start));
+        QTextDocument bodyStyle;bodyStyle.setDefaultFont(font());bodyStyle.setMarkdown("Body");
+        static const QRegularExpression heading("^ {0,3}(#{1,6})(?:[ \t]+|$)");
+        for(auto block=document()->findBlock(region.start);block.isValid()&&block.position()<=region.end;block=block.next()){
+            QTextCharFormat characters;characters.setFont(font());
+            QTextBlockFormat paragraph=block.text().trimmed().isEmpty()?QTextBlockFormat():bodyStyle.begin().blockFormat();
+            if(joinedParagraph){
+                if(block.position()>region.start)paragraph.setTopMargin(0);
+                if(block.next().isValid()&&block.next().position()<=region.end)paragraph.setBottomMargin(0);
+            }
+            const int at=region.sourceStart+block.position()-region.start;
+            bool code=false;
+            for(const auto &span:spans)if(span.kind==SpanKind::Code&&at>=span.start&&at<span.start+span.length){code=true;break;}
+            const auto match=heading.match(block.text());
+            if(!code&&match.hasMatch()){
+                // Ask Qt for its preview heading style, then apply it to the
+                // whole source line, including the visible Markdown markers.
+                QTextDocument reference;reference.setDefaultFont(font());
+                reference.setMarkdown(match.captured(1)+" Heading");
+                auto rendered=reference.begin();
+                characters.merge(rendered.begin().fragment().charFormat());
+                paragraph=rendered.blockFormat();
+            }
+            QTextCursor line(block);line.setPosition(block.position()+block.text().size(),QTextCursor::KeepAnchor);
+            line.setBlockFormat(paragraph);line.setBlockCharFormat(characters);line.setCharFormat(characters);
+        }
+    }
+    int sourcePosition(int pos)const{
+        const int i=regionAt(pos);
+        if(i>=0){const auto &r=regions[i];
+            if(i==active)return r.sourceStart+pos-r.start;
+            if(r.start==r.end)return r.sourceStart;
+            if(pos==r.end)return r.contentEnd>=0?r.contentEnd:r.sourceEnd;
+            QString visible=oldText.mid(r.start,r.end-r.start);int at=r.sourceStart;
+            // Walk one character ahead to skip leading Markdown delimiters too.
+            for(int j=0;j<=pos-r.start&&j<visible.size();++j){
+                QChar ch=visible[j];
+                if(ch==QChar::ObjectReplacementCharacter){
+                    for(const auto &span:scanSpans(source))if(span.start>=at&&span.start<r.sourceEnd&&span.kind!=SpanKind::Code){
+                        if(j==pos-r.start)return span.start;
+                        at=span.start+span.length;break;
+                    }
+                    continue;
+                }
+                int found=source.indexOf(ch,at);
+                if(found>=0&&found<r.sourceEnd){if(j==pos-r.start)return found;at=found+1;}
+            }
+            return at;
+        }return int(source.size());
+    }
+    void exposeSource(int begin,int end){
+        rebuilding=true;setPlainText(source);
+        regions={{0,int(source.size()),0,int(source.size())}};active=0;oldText=source;
+        QTextCursor selected(document());selected.setPosition(qBound(0,begin,int(source.size())));
+        selected.setPosition(qBound(0,end,int(source.size())),QTextCursor::KeepAnchor);
+        setTextCursor(selected);styleActiveSource();rebuilding=false;
+    }
+    void prepareSelection(){
+        const auto caret=textCursor();
+        if(caret.hasSelection()&&caret.selectionStart()==0&&caret.selectionEnd()==document()->characterCount()-1){
+            exposeSource(caret.anchor()<caret.position()?0:int(source.size()),
+                         caret.anchor()<caret.position()?int(source.size()):0);return;
+        }
+        if(active<0||caret.selectionStart()<regions[active].start||caret.selectionEnd()>regions[active].end)
+            exposeSource(sourcePosition(caret.anchor()),sourcePosition(caret.position()));
+    }
 };
 
 class Window : public QMainWindow {
-    QPlainTextEdit *editor=new QPlainTextEdit;
+    QPlainTextEdit *editor=new NumberedEditor<QPlainTextEdit>;
     LiveEditor *preview=new LiveEditor;
     QStackedWidget *pages=new QStackedWidget;
     QAction *previewAction;
@@ -268,7 +595,7 @@ public:
     Window(){
         resize(980,780);setWindowTitle("未命名.md — MdEdit");
         auto *bar=addToolBar("文档");bar->setMovable(false);bar->setContextMenuPolicy(Qt::PreventContextMenu);
-        auto *open=bar->addAction("打开");open->setShortcut(QKeySequence::Open);
+        auto *open=bar->addAction("打开");open->setObjectName("openDocumentAction");open->setShortcut(QKeySequence::Open);
         auto *saveAction=bar->addAction("保存");saveAction->setShortcut(QKeySequence::Save);
         auto *saveAs= new QAction("另存为",this);saveAs->setShortcut(QKeySequence::SaveAs);addAction(saveAs);
         auto *spacer=new QWidget;spacer->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);bar->addWidget(spacer);
@@ -279,11 +606,28 @@ public:
         pages->addWidget(editor);pages->addWidget(preview);pages->setCurrentIndex(1);setCentralWidget(pages);
         setStyleSheet(R"(QMainWindow,QWidget{background:#202027;color:#d5d1df;}QToolBar{background:#282830;border:0;border-bottom:1px solid #37343f;padding:8px;spacing:8px;}QToolButton{padding:6px 16px;border:0;border-radius:5px;}QToolButton:hover,QToolButton:checked{background:#493d60;color:#e4d7ff;}QPlainTextEdit,QTextBrowser{border:0;selection-background-color:#514368;}QScrollBar:vertical{background:#202027;width:10px;}QScrollBar::handle:vertical{background:#4c4658;min-height:28px;border-radius:4px;}QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}QToolTip{color:#eee;background:#37313f;})");
         timer.setSingleShot(true);timer.setInterval(150);
-        preview->sourceChanged=[this](const QString &text){QTextCursor c(editor->document());c.select(QTextCursor::Document);c.insertText(text);};
+        preview->sourceChanged=[this](const QString &text){
+            const QString before=editor->toPlainText();int begin=0,oldEnd=before.size(),newEnd=text.size();
+            while(begin<oldEnd&&begin<newEnd&&before[begin]==text[begin])++begin;
+            while(oldEnd>begin&&newEnd>begin&&before[oldEnd-1]==text[newEnd-1]){--oldEnd;--newEnd;}
+            if(begin==oldEnd&&begin==newEnd)return;
+            QTextCursor c(editor->document());c.setPosition(begin);c.setPosition(oldEnd,QTextCursor::KeepAnchor);
+            c.insertText(text.mid(begin,newEnd-begin));
+        };
         preview->history=[this](bool redo){if(redo)editor->redo();else editor->undo();render();};
         connect(editor,&QPlainTextEdit::textChanged,this,[this]{updateTitle();timer.start();});
         connect(&timer,&QTimer::timeout,this,[this]{if(previewAction->isChecked())render();});
-        connect(open,&QAction::triggered,this,[this]{auto file=QFileDialog::getOpenFileName(this,"打开 Markdown 文件",path,"Markdown (*.md *.markdown *.txt);;所有文件 (*)");if(!file.isEmpty())load(file);});
+        connect(open,&QAction::triggered,this,[this]{
+            auto *dialog=new QFileDialog(this,"打开 Markdown 文件",path,"Markdown (*.md *.markdown *.txt);;所有文件 (*)");
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+#ifdef Q_OS_MACOS
+            // Avoid Cocoa's nested native-panel modal loop (also under the debugger).
+            dialog->setOption(QFileDialog::DontUseNativeDialog);
+#endif
+            dialog->setFileMode(QFileDialog::ExistingFile);
+            connect(dialog,&QFileDialog::fileSelected,this,[this](const QString &file){load(file);});
+            dialog->open();
+        });
         connect(saveAction,&QAction::triggered,this,[this]{save();});connect(saveAs,&QAction::triggered,this,[this]{save(true);});
         connect(previewAction,&QAction::toggled,this,[this](bool enabled){if(enabled)render();pages->setCurrentIndex(enabled?1:0);previewAction->setText(enabled?"Live 编辑":"源码");if(enabled)preview->setFocus();else editor->setFocus();});
         connect(preview,&QTextBrowser::anchorClicked,this,[this](const QUrl &url){if(!url.fragment().isEmpty()&&url.path().isEmpty())preview->scrollToAnchor(url.fragment());else if(url.scheme()=="https"||url.scheme()=="http")QDesktopServices::openUrl(url);});
@@ -300,6 +644,9 @@ protected:
 };
 
 int main(int argc,char **argv){
+    #ifdef Q_OS_MACOS
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+#endif
     QApplication app(argc,argv);app.setStyle("Fusion");
     try{tex::LaTeX::init(formulaResourcePath().toStdString());}catch(const std::exception &e){QMessageBox::critical(nullptr,"公式引擎初始化失败",QString::fromUtf8(e.what()));return 3;}
     int result=0;
@@ -352,7 +699,7 @@ $$$$
         }
         images=images&&centeredImage&&inlineImage;
         // Verify edits really reach the preview through the debounce timer.
-        auto checkLive=[&](bool ok,int line){if(!ok){QFile log(QDir::current().absoluteFilePath("live-failures.txt"));log.open(QIODevice::Append);log.write(QByteArray::number(line)+"\n");}return ok;};
+        auto checkLive=[&](bool ok,int line){if(!ok){qWarning()<<"Live check failed at"<<line;QFile log(QDir::current().absoluteFilePath("live-failures.txt"));if(log.open(QIODevice::Append))log.write(QByteArray::number(line)+"\n");}return ok;};
         Window live;
         auto *edit=live.findChild<QPlainTextEdit *>("markdownEditor");
         auto *output=live.findChild<QTextBrowser *>("markdownPreview");
@@ -373,10 +720,225 @@ $$$$
         auto caret=output->textCursor();caret.setPosition(2);output->setTextCursor(caret);
         images=checkLive(output->toPlainText().startsWith("# Heading"),__LINE__)&&images;
         output->insertPlainText("X");settle();
-        images=checkLive(edit->toPlainText().startsWith("# XHeading")&&liveOutput->markdown()==edit->toPlainText(),__LINE__)&&images;
+        images=checkLive(edit->toPlainText().startsWith("# HeXading")&&liveOutput->markdown()==edit->toPlainText(),__LINE__)&&images;
         caret=output->textCursor();caret.movePosition(QTextCursor::End);output->setTextCursor(caret);
         images=checkLive(!output->toPlainText().startsWith("#")&&output->toPlainText().contains("$x^2$"),__LINE__)&&images;
+        // Clicking visible text must account for hidden Markdown punctuation.
+        edit->setPlainText("# Heading\n\nBody **bold** and $x^2$");settle();
+        caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
+        images=checkLive(output->textCursor().position()==2,__LINE__)&&images;
+        // Keep the same visible blank lines when activating a paragraph.
+        for(const QString &first:{QString("First"),QString("# Heading")}){
+            const QString original=first+"\n\nSecond\n\nThird";
+            edit->setPlainText(original);settle();
+            const int blocks=output->document()->blockCount();
+            const auto next=output->document()->findBlock(output->toPlainText().indexOf("Second"));
+            const qreal beforeY=output->document()->documentLayout()->blockBoundingRect(next).top();
+            caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
+            const auto after=output->document()->findBlock(output->toPlainText().indexOf("Second"));
+            const qreal afterY=output->document()->documentLayout()->blockBoundingRect(after).top();
+            images=checkLive(blocks==5&&output->document()->blockCount()==blocks&&qAbs(beforeY-afterY)<1.0&&
+                edit->toPlainText()==original,__LINE__)&&images;
+            output->insertPlainText("X");
+            images=checkLive(edit->toPlainText().contains("\n\nSecond\n\nThird"),__LINE__)&&images;
+            caret=output->textCursor();caret.movePosition(QTextCursor::End);output->setTextCursor(caret);
+            images=checkLive(output->toPlainText().contains("\n\n")&&
+                edit->toPlainText().contains("\n\nSecond\n\nThird"),__LINE__)&&images;
+        }
+        // Enter must use the editor behavior, and existing soft breaks must
+        // keep the following paragraph at the same height when activated.
+        edit->setPlainText("First\nSecond\n\nThird");settle();
+        auto following=output->document()->findBlock(output->toPlainText().indexOf("Third"));
+        const qreal restingY=output->document()->documentLayout()->blockBoundingRect(following).top();
+        caret=output->textCursor();caret.setPosition(output->toPlainText().indexOf("Second"));
+        images=checkLive(liveOutput->lineNumberAt(caret)==2,__LINE__)&&images;
+        caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
+        following=output->document()->findBlock(output->toPlainText().indexOf("Third"));
+        images=checkLive(qAbs(restingY-output->document()->documentLayout()->blockBoundingRect(following).top())<1.0,__LINE__)&&images;
+        caret=output->textCursor();caret.movePosition(QTextCursor::EndOfBlock);output->setTextCursor(caret);
+        QKeyEvent enter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier,"\r");
+        QApplication::sendEvent(output,&enter);
+        images=checkLive(edit->toPlainText()=="First\n\nSecond\n\nThird"&&
+            liveOutput->lineNumberForBlock(output->textCursor().block())==2,__LINE__)&&images;
+        // Repeated Enter keeps the caret on each new blank line and inserts
+        // before any existing whitespace-only lines, even when hidden.
+        for(const QString &tail:{QString(),QString("\n \t\n\n# Next")}){
+            edit->setPlainText("First"+tail);settle();
+            caret=output->textCursor();caret.setPosition(5);output->setTextCursor(caret);
+            for(int count=1;count<=3;++count){
+                QKeyEvent nextEnter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier,"\r");
+                QApplication::sendEvent(output,&nextEnter);
+                const QString expected="First"+QString(count,'\n')+tail;
+                images=checkLive(edit->toPlainText()==expected&&liveOutput->markdown()==expected&&
+                    output->textCursor().block().text().isEmpty()&&
+                    liveOutput->lineNumberAt(output->textCursor())==count+1,__LINE__)&&images;
+            }
+            output->insertPlainText("New");
+            images=checkLive(edit->toPlainText()=="First\n\n\nNew"+tail,__LINE__)&&images;
+        }
+        // Leading, consecutive, whitespace-only and trailing blank lines survive.
+        const QString spaced="\nFirst\n\n \t\n\nSecond\n";
+        edit->setPlainText(spaced);settle();
+        images=checkLive(output->toPlainText()=="\nFirst\n\n\n\nSecond\n"&&
+            output->document()->blockCount()==7&&edit->toPlainText()==spaced,__LINE__)&&images;
+        const auto blank=output->document()->findBlockByNumber(2);
+        images=checkLive(liveOutput->lineNumberForBlock(blank)==3,__LINE__)&&images;
+        output->setTextCursor(QTextCursor(blank));output->insertPlainText("New text");
+        images=checkLive(edit->toPlainText()=="\nFirst\nNew text\n \t\n\nSecond\n",__LINE__)&&images;
+        // A down arrow landing at a paragraph's end must not skip that paragraph.
+        edit->setPlainText("aa\n\nbb\n\ncc");settle();
+        caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
+        caret=output->textCursor();caret.movePosition(QTextCursor::EndOfBlock);output->setTextCursor(caret);
+        QKeyEvent down(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);
+        for(const QString &expected:{QString(),QString("bb"),QString(),QString("cc")}){
+            QApplication::sendEvent(output,&down);
+            images=checkLive(output->textCursor().block().text()==expected,__LINE__)&&images;
+        }
+        QKeyEvent up(QEvent::KeyPress,Qt::Key_Up,Qt::NoModifier);
+        QApplication::sendEvent(output,&up);
+        images=checkLive(output->textCursor().block().text().isEmpty(),__LINE__)&&images;
+        images=checkLive(edit->toPlainText()=="aa\n\nbb\n\ncc",__LINE__)&&images;
+        edit->setPlainText("first\n\nsecond\n\nthird");settle();
+        caret=output->textCursor();caret.setPosition(output->toPlainText().indexOf("second")+6);output->setTextCursor(caret);
+        images=checkLive(output->textCursor().block().text()=="second"&&output->textCursor().positionInBlock()==6,__LINE__)&&images;
+        // Live gutters count blank lines as source lines too.
+        edit->setPlainText("# Heading\n\nSecond\n\nThird");settle();
+        for(const auto &entry:QList<QPair<QString,int>>{{"Heading",1},{"Second",3},{"Third",5}}){
+            auto block=output->document()->findBlock(output->toPlainText().indexOf(entry.first));
+            images=checkLive(liveOutput->lineNumberForBlock(block)==entry.second,__LINE__)&&images;
+        }
+        caret=output->textCursor();caret.setPosition(output->toPlainText().indexOf("Second"));output->setTextCursor(caret);
+        output->insertPlainText("New line\n");
+        auto third=output->document()->findBlock(output->toPlainText().indexOf("Third"));
+        images=checkLive(liveOutput->lineNumberForBlock(third)==6&&liveOutput->sourceLineCount()==6&&
+            edit->toPlainText()=="# Heading\n\nNew line\nSecond\n\nThird",__LINE__)&&images;
+        images=checkLive(edit->findChild<QWidget *>("lineNumberArea")&&
+            output->findChild<QWidget *>("lineNumberArea"),__LINE__)&&images;
+        // Editing headings keeps the preview size, including every '#' marker.
+        for(int level=1;level<=6;++level){
+            const QString heading=QString(level,'#')+" Heading";
+            edit->setPlainText(heading+"\n\nBody");settle();
+            QTextDocument reference;reference.setDefaultFont(output->font());reference.setMarkdown(heading);
+            const auto expected=reference.begin().begin().fragment().charFormat();
+            caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
+            for(int pos:{0,level+1}){
+                QTextCursor sample(output->document());sample.setPosition(pos);sample.movePosition(QTextCursor::NextCharacter,QTextCursor::KeepAnchor);
+                auto actual=sample.charFormat();
+                images=checkLive(actual.fontWeight()==expected.fontWeight()&&
+                    actual.property(QTextFormat::FontSizeAdjustment)==expected.property(QTextFormat::FontSizeAdjustment),__LINE__)&&images;
+            }
+            images=checkLive(edit->toPlainText()==heading+"\n\nBody",__LINE__)&&images;
+        }
+        edit->setPlainText("# Heading\n\nBody **bold** and $x^2$");settle();
+        caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
+        // Opening one inline span must leave its siblings rendered.
+        edit->setPlainText("Start $x$ and **bold**\nplus $y$ end");settle();
+        const auto formulaObject=QChar::ObjectReplacementCharacter;
+        auto visible=output->toPlainText();
+        caret=output->textCursor();caret.setPosition(visible.indexOf(formulaObject));output->setTextCursor(caret);
+        visible=output->toPlainText();
+        images=checkLive(visible.contains("$x$")&&!visible.contains("**")&&visible.count(formulaObject)==1,__LINE__)&&images;
+        caret=output->textCursor();caret.setPosition(visible.indexOf("$x$")+1);
+        caret.movePosition(QTextCursor::NextCharacter,QTextCursor::KeepAnchor);
+        output->setTextCursor(caret);output->insertPlainText("z");
+        images=checkLive(edit->toPlainText()=="Start $z$ and **bold**\nplus $y$ end",__LINE__)&&images;
+        caret=output->textCursor();caret.setPosition(output->toPlainText().indexOf("bold"));output->setTextCursor(caret);
+        visible=output->toPlainText();
+        images=checkLive(visible.contains("**bold**")&&visible.count(formulaObject)==2,__LINE__)&&images;
+        caret=output->textCursor();caret.setPosition(visible.indexOf("end"));output->setTextCursor(caret);
+        images=checkLive(!output->toPlainText().contains("**")&&output->toPlainText().count(formulaObject)==2,__LINE__)&&images;
+        edit->setPlainText("# Heading\n\nBody **bold** and $x^2$");settle();
+        caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
+        // Native input-method commits and cross-paragraph paste must update source safely.
+        QInputMethodEvent commit;commit.setCommitString(QString::fromUtf8("中文"));
+        QApplication::sendEvent(output,&commit);
+        images=checkLive(edit->toPlainText().startsWith(QString::fromUtf8("# 中文Heading")),__LINE__)&&images;
+        output->selectAll();QApplication::clipboard()->setText("Pasted **text**\n\nSecond paragraph");output->paste();
+        images=checkLive(edit->toPlainText()=="Pasted **text**\n\nSecond paragraph",__LINE__)&&images;
+        // Backspace at the next unit's start must actually remove a newline.
+        edit->setPlainText("First\n\nSecond");settle();
+        caret=output->textCursor();caret.movePosition(QTextCursor::End);output->setTextCursor(caret);
+        caret=output->textCursor();caret.setPosition(output->toPlainText().indexOf("Second"));output->setTextCursor(caret);
+        QKeyEvent backspace(QEvent::KeyPress,Qt::Key_Backspace,Qt::NoModifier);
+        QApplication::sendEvent(output,&backspace);
+        images=checkLive(edit->toPlainText()=="First\nSecond",__LINE__)&&images;
         edit->document()->setModified(false);
+        // Exercise the actual toolbar/file-dialog/load path, not just setPlainText.
+        QTemporaryDir files;
+        QString filename=files.filePath(QString::fromUtf8("打开测试.md"));
+        QFile fixture(filename);bool fixtureReady=fixture.open(QIODevice::WriteOnly);
+        QByteArray contents=QString::fromUtf8("# 打开文档\n\n正文 **加粗** 与 $x^2$\n").toUtf8();
+        if(app.arguments().size()>2){
+            QFile documentFixture(app.arguments().at(2));
+            bool readable=documentFixture.open(QIODevice::ReadOnly);
+            images=checkLive(readable,__LINE__)&&images;
+            if(readable)contents=documentFixture.readAll();
+        }
+        if(fixtureReady){fixtureReady=fixture.write(contents)==contents.size();fixture.close();}
+        images=checkLive(fixtureReady,__LINE__)&&images;
+        auto *openAction=live.findChild<QAction *>("openDocumentAction");
+        openAction->trigger();
+        auto *fileDialog=live.findChild<QFileDialog *>();
+        images=checkLive(fileDialog!=nullptr,__LINE__)&&images;
+        if(fileDialog){
+            images=checkLive(fileDialog->isVisible(),__LINE__)&&images;
+            fileDialog->selectFile(filename);
+            edit->insertPlainText("Unsaved changes");
+            images=checkLive(edit->document()->isModified(),__LINE__)&&images;
+            bool discarded=false;
+            QTimer::singleShot(0,&live,[&]{
+                auto *prompt=live.findChild<QMessageBox *>();
+                if(prompt&&prompt->button(QMessageBox::Discard)){
+                    discarded=true;prompt->button(QMessageBox::Discard)->click();
+                }
+            });
+            QMetaObject::invokeMethod(fileDialog,"accept",Qt::DirectConnection);
+            settle();
+            images=checkLive(discarded&&!edit->document()->isModified(),__LINE__)&&images;
+            images=checkLive(edit->toPlainText()==QString::fromUtf8(contents)&&
+                liveOutput->markdown()==edit->toPlainText()&&
+                !output->toPlainText().isEmpty(),__LINE__)&&images;
+        }
+        edit->document()->setModified(false);
+        // Measure visible layout for units after the first one, where Qt
+        // may discard the first block format when inserting a fragment.
+        {
+            LiveEditor layoutProbe;
+            layoutProbe.setFont(output->font());
+            layoutProbe.resize(640,480);
+            layoutProbe.show();
+            for(const QString &middle:{QString("Body"),QString("# Heading"),QString("First row\nSecond row"),QString("Body **bold**"),QString(" \t")}){
+                const QString original="Before\n\n"+middle+"\n\nAfter";
+                layoutProbe.setSource(original);
+                auto *doc=layoutProbe.document();
+                auto top=[&](const QTextBlock &block){return doc->documentLayout()->blockBoundingRect(block).top();};
+                const qreal before=top(doc->lastBlock());
+                const qreal unitBefore=top(doc->findBlockByNumber(2));
+                layoutProbe.setTextCursor(QTextCursor(doc->findBlockByNumber(2)));
+                images=checkLive(before>unitBefore&&unitBefore>0&&qAbs(top(doc->lastBlock())-before)<1.0&&
+                    qAbs(top(doc->findBlockByNumber(2))-unitBefore)<1.0&&layoutProbe.markdown()==original,__LINE__)&&images;
+            }
+        }
+        {
+            LiveEditor probe;
+            probe.resize(640,480);
+            probe.show();
+            probe.setSource("Start $x$ and **bold**\nplus $y$ end");
+            const QString visible=probe.toPlainText();
+            caret=probe.textCursor();caret.setPosition(visible.indexOf(formulaObject));
+            const auto leftEdge=probe.cursorRect(caret);
+            caret.movePosition(QTextCursor::NextCharacter);
+            const auto rightEdge=probe.cursorRect(caret);
+            const QPoint hit(rightEdge.left()-2,leftEdge.center().y());
+            QMouseEvent click(QEvent::MouseButtonPress,QPointF(hit),
+                QPointF(probe.viewport()->mapToGlobal(hit)),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(probe.viewport(),&click);
+            QMouseEvent release(QEvent::MouseButtonRelease,QPointF(hit),
+                QPointF(probe.viewport()->mapToGlobal(hit)),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(probe.viewport(),&release);
+            images=checkLive(probe.toPlainText().contains("$x$")&&
+                probe.toPlainText().count(formulaObject)==1,__LINE__)&&images;
+        }
         QImage shot(view.size(),QImage::Format_ARGB32);shot.fill(QColor("#202027"));view.setStyleSheet("color:#ddd9e7;background:#202027;");view.render(&shot);shot.save(QDir::current().absoluteFilePath("math-smoke.png"));
         if(!images){qWarning()<<n<<errors;result=1;}
     }else{Window w;if(app.arguments().size()>1)w.load(app.arguments().at(1));w.show();result=app.exec();}

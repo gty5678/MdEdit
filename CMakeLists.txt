@@ -42,7 +42,7 @@ install(SCRIPT ${deploy_script})
 
 include(CTest)
 if(BUILD_TESTING)
-  add_test(NAME markdown-math-smoke COMMAND MdEdit --smoke-test)
+  add_test(NAME markdown-math-smoke COMMAND MdEdit --smoke-test "${CMAKE_CURRENT_SOURCE_DIR}/综合测试.md")
   set_tests_properties(markdown-math-smoke PROPERTIES TIMEOUT 60)
   if(WIN32)
     set_tests_properties(markdown-math-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=windows")

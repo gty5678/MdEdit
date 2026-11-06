@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "MdEdit Debug",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/macos-qt-debug/MdEdit.app/Contents/MacOS/MdEdit",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "CMake: Build Debug",
+      "preRunCommands": [
+        "command script import \"${workspaceFolder}/.vscode/mdedit_lldb.py\""
+      ]
+    },
+    {
+      "name": "MdEdit Release",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/macos-qt-release/MdEdit.app/Contents/MacOS/MdEdit",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "CMake: Build Release",
+      "preRunCommands": [
+        "command script import \"${workspaceFolder}/.vscode/mdedit_lldb.py\""
+      ]
+    }
+  ]
+}

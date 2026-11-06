@@ -21,6 +21,39 @@
     {
       "name": "linux-release",
       "inherits": "release"
+    },
+    {
+      "name": "macos-qt",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{HOME}/Qt/6.12.0/macos;${sourceDir}/build-local/qt612-deps;${sourceDir}/build-vcpkg/vcpkg_installed/arm64-osx",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/build-vcpkg/vcpkg_installed",
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true
+      }
+    },
+    {
+      "name": "macos-qt-debug",
+      "displayName": "macOS Qt 6.12 Debug",
+      "inherits": "macos-qt",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "macos-qt-release",
+      "displayName": "macOS Qt 6.12 Release",
+      "inherits": "macos-qt",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
   "buildPresets": [
@@ -39,6 +72,14 @@
     {
       "name": "linux-release",
       "configurePreset": "linux-release"
+    },
+    {
+      "name": "macos-qt-debug",
+      "configurePreset": "macos-qt-debug"
+    },
+    {
+      "name": "macos-qt-release",
+      "configurePreset": "macos-qt-release"
     }
   ],
   "testPresets": [
@@ -66,6 +107,20 @@
     {
       "name": "linux-release",
       "configurePreset": "linux-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-qt-debug",
+      "configurePreset": "macos-qt-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-qt-release",
+      "configurePreset": "macos-qt-release",
       "output": {
         "outputOnFailure": true
       }

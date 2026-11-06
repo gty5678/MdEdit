@@ -1,0 +1,83 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: Configure Debug",
+      "type": "process",
+      "command": "cmake",
+      "args": [
+        "--preset",
+        "macos-qt-debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: Build Debug",
+      "type": "process",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "--preset",
+        "macos-qt-debug",
+        "--parallel"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "CMake: Configure Debug",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "CMake: Configure Release",
+      "type": "process",
+      "command": "cmake",
+      "args": [
+        "--preset",
+        "macos-qt-release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake: Build Release",
+      "type": "process",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "--preset",
+        "macos-qt-release",
+        "--parallel"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "CMake: Configure Release",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      }
+    },
+    {
+      "label": "MdEdit: Run without debugger",
+      "type": "process",
+      "command": "${workspaceFolder}/build/macos-qt-release/MdEdit.app/Contents/MacOS/MdEdit",
+      "args": [],
+      "dependsOn": "CMake: Build Release",
+      "problemMatcher": []
+    }
+  ]
+}
