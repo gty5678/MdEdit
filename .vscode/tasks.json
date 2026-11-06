@@ -91,10 +91,16 @@
       },
       "problemMatcher": [],
       "windows": {
+        "command": "cmd.exe",
         "args": [
+          "/d",
+          "/c",
+          ".vscode\\msvc-x64.cmd",
+          "cmake",
           "--preset",
-          "windows-release"
-        ]
+          "windows-qt-release"
+        ],
+        "problemMatcher": []
       },
       "linux": {
         "args": [
@@ -125,11 +131,19 @@
         "isDefault": false
       },
       "windows": {
+        "command": "cmd.exe",
         "args": [
+          "/d",
+          "/c",
+          ".vscode\\msvc-x64.cmd",
+          "cmake",
           "--build",
           "--preset",
-          "windows-release",
+          "windows-qt-release",
           "--parallel"
+        ],
+        "problemMatcher": [
+          "$msCompile"
         ]
       },
       "linux": {
@@ -149,12 +163,7 @@
       "dependsOn": "CMake: Build Release",
       "problemMatcher": [],
       "windows": {
-        "command": "${workspaceFolder}/build/windows-release/MdEdit.exe",
-        "options": {
-          "env": {
-            "PATH": "${workspaceFolder}/build/windows-deps/vcpkg_installed/x64-mingw-dynamic/bin;${env:PATH}"
-          }
-        }
+        "command": "${workspaceFolder}/build/windows-qt-release/MdEdit.exe"
       },
       "linux": {
         "command": "${workspaceFolder}/build-vcpkg/MdEdit"

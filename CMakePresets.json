@@ -129,6 +129,17 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": true,
         "MDEDIT_DEPLOY_WINDOWS_RUNTIME": true
       }
+    },
+    {
+      "name": "windows-qt-release",
+      "displayName": "Windows x64 Qt Release with Debug Info",
+      "inherits": "windows-qt-debug",
+      "binaryDir": "${sourceDir}/build/windows-qt-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_PREFIX_PATH": "C:/Qt/6.12.0/msvc2022_64;${sourceDir}/build/validation-installed/x64-windows",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/build/validation-installed"
+      }
     }
   ],
   "buildPresets": [
@@ -167,6 +178,10 @@
     {
       "name": "windows-qt-debug",
       "configurePreset": "windows-qt-debug"
+    },
+    {
+      "name": "windows-qt-release",
+      "configurePreset": "windows-qt-release"
     }
   ],
   "testPresets": [

@@ -39,7 +39,7 @@ $$
 
 先按 [vcpkg 官方说明](https://learn.microsoft.com/vcpkg/get_started/get-started) 安装并 bootstrap vcpkg，将环境变量 `VCPKG_ROOT` 指向该目录。首次配置会下载并编译 Qt 等依赖，耗时和磁盘占用较大；后续使用 vcpkg 缓存。
 
-### Windows（x64 / VS Code）
+### Windows（MinGW 打包）
 
 安装 VS Code 和 [MSYS2](https://www.msys2.org/)。在 **MSYS2 MINGW64** 终端安装工具链：
 
@@ -47,10 +47,8 @@ $$
 pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
 ```
 
-将 MSYS2 的 `mingw64\bin`（默认 `C:\msys64\mingw64\bin`）加入 Windows 用户 `Path`，并将 `VCPKG_ROOT` 设为已运行 `bootstrap-vcpkg.bat` 的 vcpkg 目录。重新打开 VS Code，安装工作区推荐扩展。Windows 的编译、调试与打包均通过 MinGW-w64 工具链完成，无需安装 Visual Studio 或其 Build Tools。vcpkg 的目标和宿主 triplet 均为 `x64-mingw-dynamic`，依赖与应用使用同一工具链。
+将 MSYS2 的 `mingw64\bin`（默认 `C:\msys64\mingw64\bin`）加入 Windows 用户 `Path`，并将 `VCPKG_ROOT` 设为已运行 `bootstrap-vcpkg.bat` 的 vcpkg 目录。vcpkg 的目标和宿主 triplet 均为 `x64-mingw-dynamic`。本机 VS Code 调试步骤见下文的 Windows Qt 6.12.0 配置。
 
-- 按 F5，选择 `MdEdit Debug (Windows / Linux)` 自动配置、编译并启动 GDB 调试。
-- 按 Ctrl+Shift+B 构建 Debug。通过“任务：运行任务”可选 `CMake: Build Release` 或 `MdEdit: Run without debugger`。
 - 运行任务 `MdEdit: Package Windows`，或在 VS Code 集成终端执行 `.\build.cmd`。脚本会构建 Release、运行冒烟测试并安装到 `dist/windows`。
 
 Windows 使用 `build/windows-debug` 和 `build/windows-release`，共用 `build/windows-deps/vcpkg_installed`。已有的旧版 Windows 构建缓存可以留在原目录，新预设会在独立目录重新配置。需要清除新预设缓存时，在 CMake Tools 中运行“Delete Cache and Reconfigure”，或执行 `cmake --fresh --preset windows-release`。
@@ -83,7 +81,7 @@ bash build-linux.sh
 
 各平台的 vcpkg Release 预设为 `windows-release`、`macos-release` 和 `linux-release`。macOS 和 Linux 的 Release 构建目录是 `build-vcpkg`。更换 triplet 或编译器时请使用新的构建目录。使用 vcpkg 预设时，应清除此前为官方 Qt kit 设置的 `Qt6_DIR` 或 `CMAKE_PREFIX_PATH`。
 
-Linux 可在 VS Code 里用 `MdEdit Debug (Windows / Linux)` 调试，系统需安装 GDB，并设置好 `VCPKG_ROOT`。Debug 使用 `linux-debug` 预设，产物位于 `build/linux-debug`。
+Linux 可在 VS Code 里用 `MdEdit Debug (Linux)` 调试，系统需安装 GDB，并设置好 `VCPKG_ROOT`。Debug 使用 `linux-debug` 预设，产物位于 `build/linux-debug`。
 
 Windows/macOS 测试使用原生平台插件，Linux 使用 offscreen 插件（无需显示服务器）。测试覆盖编辑操作、行内公式、分式、积分、矩阵与代码区域保护，在对应构建目录生成 `math-smoke.png`。Linux 安装目录包含资源与许可证，运行依赖的部署支持取决于 Qt 版本和系统。
 

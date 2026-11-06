@@ -10,6 +10,14 @@
       "preLaunchTask": "CMake: Build Debug"
     },
     {
+      "name": "MdEdit Release (Windows)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/windows-qt-release/MdEdit.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "CMake: Build Release"
+    },
+    {
       "name": "MdEdit Debug (macOS)",
       "type": "lldb",
       "request": "launch",
@@ -34,42 +42,22 @@
       ]
     },
     {
-      "name": "MdEdit Debug (Windows / Linux)",
+      "name": "MdEdit Debug (Linux)",
       "type": "cppdbg",
       "request": "launch",
       "program": "${workspaceFolder}/build/linux-debug/MdEdit",
       "cwd": "${workspaceFolder}",
       "MIMode": "gdb",
-      "preLaunchTask": "CMake: Build Debug",
-      "windows": {
-        "program": "${workspaceFolder}/build/windows-debug/MdEdit.exe",
-        "miDebuggerPath": "gdb.exe",
-        "environment": [
-          {
-            "name": "PATH",
-            "value": "${workspaceFolder}/build/windows-deps/vcpkg_installed/x64-mingw-dynamic/debug/bin;${env:PATH}"
-          }
-        ]
-      }
+      "preLaunchTask": "CMake: Build Debug"
     },
     {
-      "name": "MdEdit Release (Windows / Linux)",
+      "name": "MdEdit Release (Linux)",
       "type": "cppdbg",
       "request": "launch",
       "program": "${workspaceFolder}/build-vcpkg/MdEdit",
       "cwd": "${workspaceFolder}",
       "MIMode": "gdb",
-      "preLaunchTask": "CMake: Build Release",
-      "windows": {
-        "program": "${workspaceFolder}/build/windows-release/MdEdit.exe",
-        "miDebuggerPath": "gdb.exe",
-        "environment": [
-          {
-            "name": "PATH",
-            "value": "${workspaceFolder}/build/windows-deps/vcpkg_installed/x64-mingw-dynamic/bin;${env:PATH}"
-          }
-        ]
-      }
+      "preLaunchTask": "CMake: Build Release"
     }
   ]
 }
