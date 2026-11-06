@@ -465,12 +465,14 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
         std::optional<QTextBlockFormat> listItemFormat;
         bool codeBlock=false;
         int codeFenceStart=-1;
+        bool listItem=false;
     };
     QList<Region> regions;
     QString source;
     int active=-1;
     bool rebuilding=false;
     bool movingCursor=false;
+    bool movingVertically=false;
     bool sourceExposed=false;
     QString pressedLink;
     QPoint linkPressPosition;
@@ -538,6 +540,7 @@ public:
         rebuilding=true;int scroll=verticalScrollBar()->value();
         sourceExposed=false;
         const int caretY=cursorRect().top();
+        const int preferredX=movingVertically?textCursor().verticalMovementX():-1;
         if(renderedFont!=font()||renderedBaseUrl!=document()->baseUrl()){
             renderedMarkdown.clear();
             renderedFont=font();
@@ -761,6 +764,7 @@ public:
                     const int start=out.position();
                     out.insertText(text.left(bodyOffset),normal);
                     regions.append({unit.first,unit.first+bodyOffset,start,out.position(),unit.first+bodyOffset,true});
+                    regions.last().listItem=true;
                 }
                 int begin=bodyOffset;
                 for(const auto &piece:pieces){
@@ -789,6 +793,7 @@ public:
                     }
                     regions.append({unit.first+begin,end==text.size()?unit.second:unit.first+end,
                         start,out.position(),unit.first+end,true});
+                    regions.last().listItem=item!=listItems.cend();
                     begin=end;
                 }
                 continue;
@@ -852,7 +857,7 @@ public:
             regions.append({unit.first,unit.second,from,out.position(),contentEnd,false,continuesBefore,continuesAfter,listItemFormat});
         }
         styleActiveSource();
-        if(target>=0&&active>=0){QTextCursor caret(document());caret.setPosition(regions[active].start+qBound(0,target-regions[active].sourceStart,regions[active].end-regions[active].start));setTextCursor(caret);}
+        if(target>=0&&active>=0){QTextCursor caret(document());caret.setPosition(regions[active].start+qBound(0,target-regions[active].sourceStart,regions[active].end-regions[active].start));caret.setVerticalMovementX(preferredX);setTextCursor(caret);}
         oldText=toPlainText();verticalScrollBar()->setValue(scroll);
         if(forcedTarget>=0)ensureCursorVisible();
         else if(target>=0)verticalScrollBar()->setValue(scroll+cursorRect().top()-caretY);
@@ -933,6 +938,7 @@ protected:
         if(event->reason()!=Qt::ActiveWindowFocusReason&&active>=0)rebuild(-1,0);
     }
     void keyPressEvent(QKeyEvent *event)override{
+        QScopedValueRollback<bool> verticalNavigation(movingVertically,event->key()==Qt::Key_Up||event->key()==Qt::Key_Down);
         const bool deleting=event->key()==Qt::Key_Backspace||event->key()==Qt::Key_Delete||event->matches(QKeySequence::Cut);
         const int scrollBeforeEdit=verticalScrollBar()->value();
         const bool newline=event->key()==Qt::Key_Return||event->key()==Qt::Key_Enter;
@@ -979,13 +985,16 @@ protected:
             return;}
         if(active<0)activateCaretRegion();
         if(active<0){event->ignore();return;}
-        if(event->key()==Qt::Key_Left&&event->modifiers()==Qt::NoModifier&&!textCursor().hasSelection()&&
-            textCursor().atBlockStart()&&textCursor().block().textList()){
+        if((event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)&&
+            event->modifiers()==Qt::NoModifier&&!textCursor().hasSelection()){
             const int at=sourcePosition(textCursor().position());
-            const int lineStart=at==0?0:source.lastIndexOf('\n',at-1)+1;
-            const auto marker=listMarker().match(source.mid(lineStart).section('\n',0,0));
-            if(marker.hasMatch()&&at==lineStart+marker.capturedLength()){
-                rebuild(-1,0,at-1);event->accept();return;
+            QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme,source);boundary.setPosition(at);
+            const int next=event->key()==Qt::Key_Left?boundary.toPreviousBoundary():boundary.toNextBoundary();
+            if(next>=0){
+                const auto here=listPrefixAt(at),there=listPrefixAt(next);
+                if((here&&at<here->second)||(there&&next<there->second)){
+                    rebuild(-1,0,next);event->accept();return;
+                }
             }
         }
         if(!textCursor().hasSelection()){
@@ -1002,6 +1011,15 @@ protected:
         if(newline||event->key()==Qt::Key_Backspace||event->key()==Qt::Key_Delete||
            event->matches(QKeySequence::Cut)||event->matches(QKeySequence::Paste)||
            (!event->text().isEmpty()&&!(event->modifiers()&(Qt::ControlModifier|Qt::MetaModifier))))prepareSelection();
+        std::optional<QPair<int,int>> verticalPrefix;
+        int prefixColumn=0;
+        if((event->key()==Qt::Key_Up||event->key()==Qt::Key_Down)&&
+            event->modifiers()==Qt::NoModifier&&!textCursor().hasSelection()){
+            const int at=sourcePosition(textCursor().position());
+            verticalPrefix=listPrefixAt(at);
+            if(verticalPrefix&&at<verticalPrefix->second)prefixColumn=at-verticalPrefix->first;
+            else verticalPrefix.reset();
+        }
         {
             // QTextControl still uses the old document positions until its key
             // handler returns. Rebuild only after that movement has finished.
@@ -1011,6 +1029,13 @@ protected:
         }
         // Cross-region edits temporarily use the full source so Qt can apply
         // its usual deletion and selection rules across Markdown boundaries.
+        if(verticalPrefix){
+            const auto destination=listPrefixAt(sourcePosition(textCursor().position()));
+            if(destination&&destination->first!=verticalPrefix->first){
+                rebuild(-1,0,destination->first+qMin(prefixColumn,destination->second-destination->first-1));
+                event->accept();return;
+            }
+        }
         if(sourceExposed)rebuild(-1,0,textCursor().position());
         else if(toPlainText()==oldText)activateCaretRegion();
         if(deleting){
@@ -1028,6 +1053,15 @@ protected:
         QTextBrowser::inputMethodEvent(event);
     }
 private:
+    std::optional<QPair<int,int>> listPrefixAt(int at)const{
+        const int start=at==0?0:source.lastIndexOf('\n',at-1)+1;
+        const auto marker=listMarker().match(source.mid(start).section('\n',0,0));
+        if(!marker.hasMatch())return {};
+        const int end=start+marker.capturedLength();
+        for(const auto &region:regions)
+            if(region.listItem&&region.sourceStart>=start&&region.sourceStart<=end)return qMakePair(start,end);
+        return {};
+    }
     QTextCharFormat codeCharacters()const{
         auto codeFont=font();
         codeFont.setFamily(QString::fromLatin1(editorFont));
@@ -2036,6 +2070,52 @@ $$$$
             QApplication::sendEvent(&probe,&splitLine);
             images=checkLive(probe.markdown()=="**one** and **two** \nremainder"+tail&&
                 probe.cursorRect().top()>beforeEnter&&probe.lineNumberAt(probe.textCursor())==2,__LINE__)&&images;
+        }
+        {
+            LiveEditor probe;
+            probe.resize(640,360);probe.show();
+            // Every character, including hidden prefixes and item boundaries,
+            // remains reachable in both directions without a mouse click.
+            for(const QString &list:{QString("- one\n- two\n- three"),
+                    QString("1. one\n2. two\n3. three"),
+                    QString("- one\n  - two\n- three"),
+                    QString("- [x] one\n- [ ] two\n- [x] three")}){
+                probe.setSource(list);probe.restoreSourceSelection(0,0);
+                for(int direction:{1,-1}){
+                    QKeyEvent arrow(QEvent::KeyPress,direction==1?Qt::Key_Right:Qt::Key_Left,Qt::NoModifier);
+                    const int start=direction==1?1:int(list.size())-1;
+                    const int end=direction==1?int(list.size())+1:-1;
+                    for(int at=start;at!=end;at+=direction){
+                        QApplication::sendEvent(&probe,&arrow);
+                        images=checkLive(probe.sourceSelection()==qMakePair(at,at)&&probe.markdown()==list,__LINE__)&&images;
+                    }
+                }
+                probe.restoreSourceSelection(0,0);
+                QKeyEvent down(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);
+                QKeyEvent up(QEvent::KeyPress,Qt::Key_Up,Qt::NoModifier);
+                const auto lines=list.split('\n');
+                const int second=lines[0].size()+1,third=second+lines[1].size()+1;
+                for(int expected:{second,third}){
+                    QApplication::sendEvent(&probe,&down);
+                    images=checkLive(probe.sourceSelection()==qMakePair(expected,expected),__LINE__)&&images;
+                }
+                for(int expected:{second,0}){
+                    QApplication::sendEvent(&probe,&up);
+                    images=checkLive(probe.sourceSelection()==qMakePair(expected,expected),__LINE__)&&images;
+                }
+            }
+            const QString uneven="- aaaaaa\n- a\n- aaaaaa";
+            probe.setSource(uneven);probe.restoreSourceSelection(5,5);
+            QKeyEvent down(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);
+            QKeyEvent up(QEvent::KeyPress,Qt::Key_Up,Qt::NoModifier);
+            for(int expected:{12,18}){
+                QApplication::sendEvent(&probe,&down);
+                images=checkLive(probe.sourceSelection()==qMakePair(expected,expected),__LINE__)&&images;
+            }
+            for(int expected:{12,5}){
+                QApplication::sendEvent(&probe,&up);
+                images=checkLive(probe.sourceSelection()==qMakePair(expected,expected)&&probe.markdown()==uneven,__LINE__)&&images;
+            }
         }
         {
             LiveEditor probe;
