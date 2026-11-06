@@ -83,6 +83,12 @@ cmake --install build-vcpkg --prefix dist/local
 
 Windows/macOS 测试使用原生平台插件，Linux 使用 offscreen 插件（测试无需显示服务器）；覆盖编辑操作、行内公式、分式、积分、矩阵与代码区域保护，生成 `build-vcpkg/math-smoke.png`。macOS/Linux 仍需在对应系统执行构建、测试和 GUI 检查。Linux 安装目录包含资源与许可证，但不保证可跨发行版直接运行；Qt 的运行依赖部署支持取决于该 Qt 版本和系统。
 
+## VS Code（本机 Windows x64 / Qt 6.12.0）
+
+用 VS Code 打开项目根目录并安装 Microsoft C/C++ 扩展（`ms-vscode.cpptools`）。在“运行和调试”中选择 **MdEdit Debug (Windows)**，打开 `src/main.cpp` 设置断点，然后按 F5。构建任务自动加载 Visual Studio 的 x64 MSVC 环境，配置并编译 Debug 版本，并将 Qt DLL 和平台插件部署到 `build/windows-qt-debug`。Ctrl+F5 可直接运行。
+
+此预设使用本机 `C:/Qt/6.12.0/msvc2022_64` 和 `build/windows-debug-deps/x64-windows` 下用相同工具链编译的 Debug 版 tinyxml2 和 MicroTeX。后者位于被 Git 忽略的 `build` 目录。换机器或清空该目录后，需要重新构建这两个 Debug 依赖并安装到该前缀。MicroTeX 使用 `ports/microtex` 中的源码版本、补丁及 CMake 配置。
+
 ## VS Code（本机 macOS / Qt 6.12.0）
 
 已在 `.vscode/settings.json` 为 CodeLLDB 配置 Command Line Tools 自带的 `debugserver` 路径。已配置 CMake Tools、C/C++ 和 CodeLLDB 扩展推荐；本机已安装这些扩展。使用 VS Code 打开项目根目录后：

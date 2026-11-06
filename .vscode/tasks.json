@@ -12,7 +12,19 @@
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "problemMatcher": []
+      "problemMatcher": [],
+      "windows": {
+        "command": "cmd.exe",
+        "args": [
+          "/d",
+          "/c",
+          ".vscode\\msvc-x64.cmd",
+          "cmake",
+          "--preset",
+          "windows-qt-debug"
+        ],
+        "problemMatcher": []
+      }
     },
     {
       "label": "CMake: Build Debug",
@@ -34,6 +46,22 @@
       "group": {
         "kind": "build",
         "isDefault": true
+      },
+      "windows": {
+        "command": "cmd.exe",
+        "args": [
+          "/d",
+          "/c",
+          ".vscode\\msvc-x64.cmd",
+          "cmake",
+          "--build",
+          "--preset",
+          "windows-qt-debug",
+          "--parallel"
+        ],
+        "problemMatcher": [
+          "$msCompile"
+        ]
       }
     },
     {

@@ -25,6 +25,13 @@ add_custom_command(TARGET MdEdit POST_BUILD
  COMMAND ${CMAKE_COMMAND} -DSHARE_DIR=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share -DDEST_DIR=${MDEDIT_RESOURCE_DIR}/licenses -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy-licenses.cmake"
  VERBATIM)
 
+option(MDEDIT_DEPLOY_WINDOWS_RUNTIME "Deploy Qt beside the build-tree executable" OFF)
+if(WIN32 AND MDEDIT_DEPLOY_WINDOWS_RUNTIME)
+  add_custom_command(TARGET MdEdit POST_BUILD
+    COMMAND Qt6::windeployqt --no-translations --no-compiler-runtime "$<TARGET_FILE:MdEdit>"
+    VERBATIM)
+endif()
+
 include(GNUInstallDirs)
 install(TARGETS MdEdit BUNDLE DESTINATION . RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(APPLE)

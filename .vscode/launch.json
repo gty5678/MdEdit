@@ -2,6 +2,14 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "MdEdit Debug (Windows)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/windows-qt-debug/MdEdit.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "CMake: Build Debug"
+    },
+    {
       "name": "MdEdit Debug",
       "type": "lldb",
       "request": "launch",
