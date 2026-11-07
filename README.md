@@ -33,6 +33,18 @@ $$
 
 使用内置 MicroTeX 与随程序部署的字体离线排版，不需要浏览器、网络或系统 LaTeX。代码块及行内代码不识别为公式。无法解析的公式保留源码，预览按钮的提示显示错误。公式兼容范围以 MicroTeX 为准，不支持完整 LaTeX 文档或任意宏包。
 
+## 源码结构
+
+- `src/main.cpp`：应用初始化、公式引擎生命周期与启动入口。
+- `src/platform.h`：平台字体、快捷键标签和公式资源路径。
+- `src/markdown/scanner.*`：代码/公式边界扫描、代码正文提取与词法着色。
+- `src/markdown/renderer.*`：Markdown 排版、共享文本样式与公式图像处理。
+- `src/editor/highlighter.*`：全文源码语法高亮。
+- `src/editor/numbered_editor.h`：行号组件与通用编辑器模板。
+- `src/editor/live_editor.*`：Live 编辑、源文档位置映射、输入事件与排版缓存。
+- `src/window.*`：主窗口、菜单、文件读写和设置。
+- `tests/app_tests.*`：现有 `--smoke-test`、`--edit-menu-test`、`--table-gutter-test` 测试入口；保留原命令行调用方式。
+
 ## 构建
 
 需要 Git、CMake 3.24+、Ninja 和 C++17 编译器。Qt 最低要求 6.12.0。当前 vcpkg baseline 提供 Qt 6.11.3，使用该 baseline 的 Windows、macOS 和 Linux 预设暂时无法满足版本要求。macOS 可使用下文的本机 Qt 6.12.0 预设。

@@ -5,7 +5,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 6.12.0 CONFIG REQUIRED COMPONENTS Widgets Svg)
 find_package(MicroTeX CONFIG REQUIRED)
 qt_standard_project_setup()
-qt_add_executable(MdEdit WIN32 MACOSX_BUNDLE src/main.cpp)
+qt_add_executable(MdEdit WIN32 MACOSX_BUNDLE
+  src/main.cpp
+  src/window.h src/window.cpp
+  src/platform.h
+  src/markdown/scanner.h src/markdown/scanner.cpp
+  src/markdown/renderer.h src/markdown/renderer.cpp
+  src/editor/highlighter.h src/editor/highlighter.cpp
+  src/editor/numbered_editor.h
+  src/editor/live_editor.h src/editor/live_editor.cpp
+  tests/app_tests.h tests/app_tests.cpp)
+target_include_directories(MdEdit PRIVATE src)
 if(APPLE)
   set_target_properties(MdEdit PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER "io.mdedit.app"

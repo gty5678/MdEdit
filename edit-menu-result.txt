@@ -1,0 +1,19 @@
+FAIL
+16777219 SOURCE: Before  and **keep** after
+
+# Tail heading VIEW: Before  and keep after
+
+Tail heading
+16777223 SOURCE: Before  and **keep** after
+
+# Tail heading VIEW: Before  and keep after
+
+Tail heading
+IME SOURCE: Before text and **keep** after
+
+# Tail heading VIEW: Before text and keep after
+
+Tail heading
+UNFINISHED VIEW: Before keep and **unfinished
+
+Tail heading

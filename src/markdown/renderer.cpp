@@ -1,0 +1,167 @@
+#include "renderer.h"
+#include "scanner.h"
+#include "latex.h"
+#include "core/formula.h"
+#include "platform/qt/graphic_qt.h"
+#include <memory>
+
+qreal bodyLineHeight(const QFont &font){
+    return qCeil(QFontMetricsF(font).lineSpacing()*1.5);
+}
+
+void setBodyLineHeight(QTextBlockFormat &format,const QFont &font){
+    format.setLineHeight(bodyLineHeight(font),QTextBlockFormat::FixedHeight);
+}
+
+bool isCodeBlock(const QTextBlockFormat &format){
+    return format.hasProperty(QTextFormat::BlockCodeLanguage)||format.hasProperty(QTextFormat::BlockCodeFence);
+}
+
+class FormulaImageHandler : public QObject, public QTextObjectInterface {
+    Q_OBJECT
+    Q_INTERFACES(QTextObjectInterface)
+    QTextObjectInterface *imageHandler;
+public:
+    explicit FormulaImageHandler(QAbstractTextDocumentLayout *layout)
+        :QObject(layout),imageHandler(layout->handlerForObject(QTextFormat::ImageObject)){
+        layout->registerHandler(QTextFormat::ImageObject,this);
+    }
+    QSizeF intrinsicSize(QTextDocument *document,int pos,const QTextFormat &format)override{
+        return imageHandler->intrinsicSize(document,pos,format);
+    }
+    void drawObject(QPainter *painter,const QRectF &rect,QTextDocument *document,int pos,const QTextFormat &format)override{
+        QRectF painted=rect;
+        if(format.hasProperty(formulaPaintAscent)){
+            painted.moveTop(rect.bottom()-format.doubleProperty(formulaPaintAscent));
+            painted.setHeight(format.doubleProperty(formulaPaintHeight));
+        }
+        imageHandler->drawObject(painter,painted,document,pos,format);
+    }
+};
+
+void installFormulaImageHandler(QTextDocument *document){
+    new FormulaImageHandler(document->documentLayout());
+}
+
+static QString protectMath(const QString &source, QList<QPair<QString,QString>> &math) {
+    QString result;int end=0;
+    for(const auto &span:scanSpans(source)){
+        if(span.kind==SpanKind::Code)continue;
+        result+=source.mid(end,span.start-end);
+        QString token="MDEDITMATH"+QString::number(math.size())+"TOKEN";while(source.contains(token))token+="X";
+        math.append({token,source.mid(span.start,span.length)});
+        // A display formula gets its own paragraph even when typed beside text.
+        result+=(span.kind==SpanKind::DisplayMath?"\n\n"+token+"\n\n":token);
+        end=span.start+span.length;
+    }
+    return result+source.mid(end);
+}
+
+static QString preserveLineBreaks(const QString &source){
+    const auto spans=scanSpans(source);
+    auto span=spans.cbegin();
+    QString result;
+    int start=0;
+    for(int end=source.indexOf('\n');end>=0;end=source.indexOf('\n',start)){
+        while(span!=spans.cend()&&span->start+span->length<=end)++span;
+        const bool insideCode=span!=spans.cend()&&span->start<=end&&span->kind==SpanKind::Code;
+        const auto line=QStringView(source).mid(start,end-start);
+        result+=line;
+        const bool hardBreak=end>start&&source[end-1]=='\\'&&!escaped(source,end-1);
+        if(!insideCode&&!hardBreak&&!line.trimmed().isEmpty())result+="  ";
+        result+='\n';
+        start=end+1;
+    }
+    return result+source.mid(start);
+}
+
+// Use an explicit hierarchy: Qt's default H4-H6 share the body size.
+QTextCharFormat headingCharacters(int level,const QFont &base){
+    static constexpr qreal scales[]={2.0,1.75,1.5,1.3,1.2,1.1};
+    QFont font=base;
+    const qreal scale=scales[qBound(1,level,6)-1];
+    if(base.pointSizeF()>0)font.setPointSizeF(base.pointSizeF()*scale);
+    else font.setPixelSize(qRound(base.pixelSize()*scale));
+    font.setWeight(QFont::Bold);
+    QTextCharFormat characters;characters.setFont(font);
+    return characters;
+}
+
+int renderMarkdown(QTextDocument *document,const QString &source,QStringList &errors,bool live){
+    document->setIndentWidth(24);
+    auto *layout=document->documentLayout();
+    if(!live&&!dynamic_cast<FormulaImageHandler *>(layout->handlerForObject(QTextFormat::ImageObject)))
+        new FormulaImageHandler(layout);
+    QList<QPair<QString,QString>> math;
+    document->setMarkdown(preserveLineBreaks(protectMath(source,math)));
+    for(auto block=document->begin();block.isValid();block=block.next()){
+        auto format=block.blockFormat();
+        if(format.headingLevel()){
+            // FontSizeAdjustment takes precedence over FontPointSize in Qt's
+            // text layout. Remove the relative size imported by setMarkdown.
+            for(auto it=block.begin();!it.atEnd();++it){
+                const auto fragment=it.fragment();auto characters=fragment.charFormat();
+                characters.merge(headingCharacters(format.headingLevel(),document->defaultFont()));
+                characters.clearProperty(QTextFormat::FontSizeAdjustment);
+                QTextCursor heading(document);heading.setPosition(fragment.position());
+                heading.setPosition(fragment.position()+fragment.length(),QTextCursor::KeepAnchor);
+                heading.setCharFormat(characters);
+            }
+        }
+        if(format.intProperty(QTextFormat::BlockQuoteLevel)>0){
+            format.setBackground(quoteBackground);
+            QTextCursor(block).setBlockFormat(format);
+        }
+    }
+    int rendered=0;
+    for(const auto &entry:math){
+        auto cursor=document->find(entry.first);if(cursor.isNull())continue;
+        try {
+            const bool block=entry.second.startsWith("$$");
+            const int delimiter=block?2:1;
+            tex::Formula parsed(entry.second.mid(delimiter,entry.second.size()-delimiter*2).toStdWString());
+            const QFontMetricsF textMetrics(block?document->defaultFont():
+                cursor.charFormat().font().resolve(document->defaultFont()));
+            tex::TeXRenderBuilder builder;
+            builder.setStyle(block?tex::TexStyle::display:tex::TexStyle::text)
+                .setTextSize(float(textMetrics.height()))
+                .setForeground(0xff26232d).setTrueValues(true);
+            // Natural width for inline math; display alignment belongs to its paragraph.
+            std::unique_ptr<tex::TeXRender> formula(builder.build(parsed));
+            const int padding=block?4:1;
+            const int width=qMax(1,formula->getWidth()+2*padding);
+            const int height=qMax(1,formula->getHeight()+2*padding);
+            if(width>10000||height>10000)throw std::runtime_error("Formula too large");
+            // Measure from the TeX baseline so descenders can paint below the text baseline.
+            const qreal baseline=formula->getBaseline();
+            const qreal ascent=padding+(qIsFinite(baseline)?qBound(0.0,baseline,1.0):0.0)*(height-2*padding);
+            const qreal descent=height-ascent;
+            // TeX glyphs sit visually low beside the body font, especially CJK text.
+            const qreal lift=block?0.0:textMetrics.height()*0.22;
+            const qreal scale=block?1.0:qMin(1.0,qMin(
+                (textMetrics.ascent()-lift)/ascent,(textMetrics.descent()+lift)/descent));
+            const qreal imageWidth=width*scale;
+            const qreal imageHeight=height*scale;
+            QImage image(QSize(qCeil(imageWidth*2),qCeil(imageHeight*2)),QImage::Format_ARGB32_Premultiplied);image.fill(Qt::transparent);
+            QPainter painter(&image);
+            painter.scale(image.width()/imageWidth,image.height()/imageHeight);
+            painter.scale(scale,scale);
+            painter.setRenderHint(QPainter::Antialiasing);
+            tex::Graphics2D_qt graphics(&painter);formula->draw(graphics,padding,padding);painter.end();
+            const QUrl url("math:/"+QUuid::createUuid().toString(QUuid::WithoutBraces));document->addResource(QTextDocument::ImageResource,url,image);
+            QTextImageFormat format;format.setName(url.toString());format.setWidth(imageWidth);format.setHeight(imageHeight);format.setVerticalAlignment(QTextCharFormat::AlignBaseline);
+            if(!block){
+                const qreal imageAscent=ascent*scale+lift;
+                format.setHeight(imageAscent);
+                format.setProperty(formulaPaintAscent,imageAscent);
+                format.setProperty(formulaPaintHeight,imageHeight);
+            }
+            cursor.insertImage(format);if(block){auto f=cursor.blockFormat();f.setAlignment(Qt::AlignHCenter);f.setTopMargin(14);f.setBottomMargin(14);cursor.setBlockFormat(f);}++rendered;
+        } catch(const std::exception &e){cursor.insertText(entry.second);errors.append(QString::fromUtf8(e.what()));}
+        catch(...){cursor.insertText(entry.second);errors.append("无法解析公式");}
+    }
+    return rendered;
+}
+
+
+#include "renderer.moc"
