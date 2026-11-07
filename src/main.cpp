@@ -322,7 +322,6 @@ static QTextCharFormat headingCharacters(int level,const QFont &base){
     else font.setPixelSize(qRound(base.pixelSize()*scale));
     font.setWeight(QFont::Bold);
     QTextCharFormat characters;characters.setFont(font);
-    characters.setProperty(QTextFormat::FontSizeAdjustment,0);
     return characters;
 }
 
@@ -336,8 +335,16 @@ static int renderMarkdown(QTextDocument *document,const QString &source,QStringL
     for(auto block=document->begin();block.isValid();block=block.next()){
         auto format=block.blockFormat();
         if(format.headingLevel()){
-            QTextCursor heading(block);heading.movePosition(QTextCursor::EndOfBlock,QTextCursor::KeepAnchor);
-            heading.mergeCharFormat(headingCharacters(format.headingLevel(),document->defaultFont()));
+            // FontSizeAdjustment takes precedence over FontPointSize in Qt's
+            // text layout. Remove the relative size imported by setMarkdown.
+            for(auto it=block.begin();!it.atEnd();++it){
+                const auto fragment=it.fragment();auto characters=fragment.charFormat();
+                characters.merge(headingCharacters(format.headingLevel(),document->defaultFont()));
+                characters.clearProperty(QTextFormat::FontSizeAdjustment);
+                QTextCursor heading(document);heading.setPosition(fragment.position());
+                heading.setPosition(fragment.position()+fragment.length(),QTextCursor::KeepAnchor);
+                heading.setCharFormat(characters);
+            }
         }
         if(format.intProperty(QTextFormat::BlockQuoteLevel)>0){
             format.setBackground(quoteBackground);
@@ -419,7 +426,7 @@ public:
     virtual int lineNumberAt(const QTextCursor &cursor)const{return cursor.blockNumber()+1;}
     virtual int sourceLineCount()const{return this->document()->blockCount();}
     void refreshLineNumbers(){
-        QFontMetrics metrics(QFont(editorFont,10));
+        QFontMetrics metrics(numberFont());
         int width=24+metrics.horizontalAdvance(QString::number(qMax(1,sourceLineCount())));
         if(width!=gutterWidth){gutterWidth=width;this->setViewportMargins(width,0,0,0);}
         const auto area=this->contentsRect();numbers->setGeometry(area.left(),area.top(),width,area.height());
@@ -428,9 +435,12 @@ public:
 protected:
     void resizeEvent(QResizeEvent *event)override{Base::resizeEvent(event);refreshLineNumbers();}
 private:
+    QFont numberFont() const {
+        QFont result(editorFont);result.setPointSizeF(qMax(7.0,this->font().pointSizeF()-2));return result;
+    }
     void paintNumbers(QPaintEvent *event){
         QPainter painter(numbers);painter.fillRect(event->rect(),QColor("#ffffff"));
-        painter.setFont(QFont(editorFont,10));
+        painter.setFont(numberFont());
         const int current=lineNumberAt(this->textCursor());
         auto block=this->cursorForPosition(QPoint(0,0)).block();int previous=-1;
         while(block.isValid()){
@@ -520,6 +530,9 @@ public:
     }
     void setSource(const QString &text){if(text==source&&!regions.isEmpty())return;source=text;rebuild(-1,0);}
     QString markdown()const{return source;}
+    void refreshAppearance(){
+        const auto range=sourceSelection();rebuild(-1,0);restoreSourceSelection(range.first,range.second);
+    }
     QPair<int,int> sourceSelection()const{
         const auto caret=textCursor();
         if(caret.hasSelection()&&caret.selectionStart()==0&&caret.selectionEnd()==document()->characterCount()-1)
@@ -986,14 +999,20 @@ protected:
         if(active<0)activateCaretRegion();
         if(active<0){event->ignore();return;}
         if((event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)&&
-            event->modifiers()==Qt::NoModifier&&!textCursor().hasSelection()){
-            const int at=sourcePosition(textCursor().position());
+            !(event->modifiers()&~Qt::ShiftModifier)){
+            const auto selection=sourceSelection();const int at=selection.second;
             QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme,source);boundary.setPosition(at);
-            const int next=event->key()==Qt::Key_Left?boundary.toPreviousBoundary():boundary.toNextBoundary();
+            int next=event->key()==Qt::Key_Left?boundary.toPreviousBoundary():boundary.toNextBoundary();
             if(next>=0){
                 const auto here=listPrefixAt(at),there=listPrefixAt(next);
-                if((here&&at<here->second)||(there&&next<there->second)){
-                    rebuild(-1,0,next);event->accept();return;
+                if(here||there){
+                    if(event->modifiers()&Qt::ShiftModifier)exposeSource(selection.first,next);
+                    else{
+                        if(selection.first!=selection.second)next=event->key()==Qt::Key_Left?
+                            qMin(selection.first,selection.second):qMax(selection.first,selection.second);
+                        rebuild(-1,0,next);
+                    }
+                    event->accept();return;
                 }
             }
         }
@@ -1011,6 +1030,11 @@ protected:
         if(newline||event->key()==Qt::Key_Backspace||event->key()==Qt::Key_Delete||
            event->matches(QKeySequence::Cut)||event->matches(QKeySequence::Paste)||
            (!event->text().isEmpty()&&!(event->modifiers()&(Qt::ControlModifier|Qt::MetaModifier))))prepareSelection();
+        // A source line start must stay a line start even when the next
+        // rendered block has a different indent or hidden Markdown prefix.
+        const int beforeMove=sourcePosition(textCursor().position());
+        const bool keepLineStart=movingVertically&&event->modifiers()==Qt::NoModifier&&
+            !textCursor().hasSelection()&&(beforeMove==0||source[beforeMove-1]=='\n');
         std::optional<QPair<int,int>> verticalPrefix;
         int prefixColumn=0;
         if((event->key()==Qt::Key_Up||event->key()==Qt::Key_Down)&&
@@ -1029,6 +1053,14 @@ protected:
         }
         // Cross-region edits temporarily use the full source so Qt can apply
         // its usual deletion and selection rules across Markdown boundaries.
+        if(keepLineStart){
+            auto destination=textCursor();
+            destination.movePosition(QTextCursor::StartOfLine);
+            int at=sourcePosition(destination.position());
+            if(destination.atBlockStart())at=at==0?0:source.lastIndexOf('\n',at-1)+1;
+            rebuild(-1,0,at);
+            event->accept();return;
+        }
         if(verticalPrefix){
             const auto destination=listPrefixAt(sourcePosition(textCursor().position()));
             if(destination&&destination->first!=verticalPrefix->first){
@@ -1058,8 +1090,14 @@ private:
         const auto marker=listMarker().match(source.mid(start).section('\n',0,0));
         if(!marker.hasMatch())return {};
         const int end=start+marker.capturedLength();
+        if(sourceExposed){
+            for(const auto &span:scanSpans(source))
+                if(span.kind==SpanKind::Code&&span.start<=start&&span.start+span.length>start)return {};
+            return qMakePair(start,end);
+        }
         for(const auto &region:regions)
-            if(region.listItem&&region.sourceStart>=start&&region.sourceStart<=end)return qMakePair(start,end);
+            if(region.sourceStart<=end&&region.sourceEnd>=start&&!region.codeBlock&&
+                (region.listItem||document()->findBlock(region.start).textList()))return qMakePair(start,end);
         return {};
     }
     QTextCharFormat codeCharacters()const{
@@ -1330,6 +1368,8 @@ class Window : public QMainWindow {
     QAction *previewAction;
     QTimer timer,autosave;
     QString path;
+    int baseFontSize=14;
+    const QFont defaultUiFont=QApplication::font();
 public:
     Window(){
         resize(980,780);updateTitle();
@@ -1346,7 +1386,6 @@ public:
                 color: #482775;
                 border: 1px solid #e2d4f3;
                 border-radius: 24px;
-                font-size: 15px;
                 font-weight: 600;
             }
             QPushButton#openDocumentButton:hover { background: #eae0f7; }
@@ -1362,8 +1401,8 @@ public:
         auto *spacer=new QWidget;spacer->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Preferred);bar->addWidget(spacer);
         previewAction=bar->addAction("Live 编辑");previewAction->setCheckable(true);previewAction->setChecked(true);previewAction->setShortcut(QKeySequence("Ctrl+E"));
         previewAction->setObjectName("livePreviewAction");editor->setObjectName("markdownEditor");preview->setObjectName("markdownPreview");
-        editor->setFrameShape(QFrame::NoFrame);editor->setFont(QFont(editorFont,13));editor->setTabStopDistance(32);editor->document()->setDocumentMargin(32);new Highlighter(editor->document());
-        preview->setFrameShape(QFrame::NoFrame);preview->setFont(QFont(previewFont,12));preview->document()->setDocumentMargin(40);preview->setOpenLinks(false);
+        editor->setFrameShape(QFrame::NoFrame);editor->setFont(QFont(editorFont,14));editor->setTabStopDistance(32);editor->document()->setDocumentMargin(32);new Highlighter(editor->document());
+        preview->setFrameShape(QFrame::NoFrame);preview->setFont(QFont(previewFont,13));preview->document()->setDocumentMargin(40);preview->setOpenLinks(false);
         pages->addWidget(editor);pages->addWidget(preview);pages->setCurrentIndex(1);
         screens->addWidget(welcome);screens->addWidget(pages);setCentralWidget(screens);
         setStyleSheet(R"(QMainWindow,QWidget{background:#ffffff;color:#26232d;}QToolBar{background:#ffffff;border:0;border-bottom:1px solid #dedbe4;padding:8px;spacing:8px;}QToolButton{padding:6px 16px;border:0;border-radius:5px;}QToolButton:hover,QToolButton:checked{background:#eae2f7;color:#482775;}QPlainTextEdit,QTextBrowser{border:0;selection-background-color:#e3d7f5;selection-color:#26232d;}QScrollBar:vertical{background:#ffffff;width:10px;}QScrollBar::handle:vertical{background:#a9a2b2;min-height:28px;border-radius:4px;}QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}QToolTip{color:#26232d;background:#f2eef7;})");
@@ -1412,8 +1451,169 @@ public:
             if(url.scheme()=="https"||url.scheme()=="http")QDesktopServices::openUrl(url);
             else if(url.isRelative()&&url.path().isEmpty()&&!url.fragment().isEmpty())preview->scrollToAnchor(url.fragment());
         });
+        auto *fileMenu=menuBar()->addMenu("文件");
+        auto *openAction=fileMenu->addAction("打开…");openAction->setShortcut(QKeySequence::Open);
+        connect(openAction,&QAction::triggered,open,&QPushButton::click);
+        // The window action also works after leaving the welcome screen.
+        openShortcut->setEnabled(false);
+        auto *saveAction=fileMenu->addAction("保存");saveAction->setShortcut(QKeySequence::Save);
+        connect(saveAction,&QAction::triggered,this,[this]{save();});
+        auto *editMenu=menuBar()->addMenu("编辑");
+        auto command=[this,editMenu](const QString &name,const QKeySequence &key,std::function<void()> fn){
+            auto *action=editMenu->addAction(name);action->setShortcut(key);
+            connect(action,&QAction::triggered,this,[this,fn]{if(screens->currentWidget()==pages)fn();});
+        };
+        command("加粗",QKeySequence::Bold,[this]{formatSelection("**","**");});
+        command("斜体",QKeySequence::Italic,[this]{formatSelection("*","*");});
+        command("行内代码",QKeySequence("Ctrl+Shift+C"),[this]{formatSelection("`","`");});
+        command("插入链接",QKeySequence("Ctrl+K"),[this]{formatSelection("[","](url)");});
+        command("复制段落 / 选区",QKeySequence::Copy,[this]{clipboardParagraph(false);});
+        command("剪切段落 / 选区",QKeySequence::Cut,[this]{clipboardParagraph(true);});
+        command("增加缩进",QKeySequence("Ctrl+]"),[this]{indentSelection(false);});
+        command("减少缩进",QKeySequence("Ctrl+["),[this]{indentSelection(true);});
+        command("查找…",QKeySequence::Find,[this]{showFind(false);});
+        command("替换…",QKeySequence("Ctrl+H"),[this]{showFind(true);});
+        command("删除当前行",QKeySequence("Ctrl+Shift+K"),[this]{
+            const auto r=selection();if(r.first!=r.second)return;
+            const auto text=editor->toPlainText();int a=r.first?text.lastIndexOf('\n',r.first-1)+1:0;
+            int b=text.indexOf('\n',r.first);if(b<0){b=text.size();if(a>0)--a;}else ++b;
+            replaceSource(a,b,{},a,a);
+        });
+        auto *settingsAction=bar->addAction("设置");
+        settingsAction->setObjectName("settingsAction");settingsAction->setShortcut(QKeySequence("Ctrl+,"));
+        settingsAction->setMenuRole(QAction::PreferencesRole);
+        fileMenu->addSeparator();fileMenu->addAction(settingsAction);
+        connect(settingsAction,&QAction::triggered,this,[this]{showSettings();});
+        applyBaseFontSize(QSettings().value("appearance/baseFontSize",14).toInt());
         editor->document()->setModified(false);
         render();open->setFocus();
+    }
+    void applyBaseFontSize(int size){
+        baseFontSize=qBound(9,size,30);
+        const auto range=selection();
+        const bool modified=editor->document()->isModified();
+        const QSignalBlocker blockEditor(editor);
+        QFont ui=defaultUiFont;
+        ui.setPointSizeF(qMax(9.0,(ui.pointSizeF()>0?ui.pointSizeF():13)+baseFontSize-13));
+        setFont(ui);menuBar()->setFont(ui);
+        editor->setFont(QFont(editorFont,baseFontSize+1));
+        editor->setTabStopDistance(QFontMetricsF(editor->font()).horizontalAdvance(' ')*4);
+        preview->setFont(QFont(previewFont,baseFontSize));
+        preview->refreshAppearance();
+        static_cast<NumberedEditor<QPlainTextEdit> *>(editor)->refreshLineNumbers();
+        preview->refreshLineNumbers();
+        selectSource(range.first,range.second);
+        editor->document()->setModified(modified);
+    }
+    void showSettings(){
+        if(auto *existing=findChild<QDialog *>("settingsDialog")){existing->show();existing->raise();existing->activateWindow();return;}
+        auto *dialog=new QDialog(this);dialog->setObjectName("settingsDialog");
+        dialog->setAttribute(Qt::WA_DeleteOnClose);dialog->setWindowTitle("设置");
+        auto *layout=new QFormLayout(dialog);
+        auto *size=new QSpinBox;size->setObjectName("baseFontSize");size->setRange(9,30);size->setSuffix(" pt");size->setValue(baseFontSize);
+        layout->addRow("基础字号",size);
+        auto *hint=new QLabel("调整正文、源码和界面字号；标题按比例缩放。修改即时生效并自动保存。");
+        hint->setWordWrap(true);layout->addRow(hint);
+        connect(size,&QSpinBox::valueChanged,this,[this](int value){
+            applyBaseFontSize(value);QSettings settings;settings.setValue("appearance/baseFontSize",baseFontSize);settings.sync();
+            if(settings.status()!=QSettings::NoError)statusBar()->showMessage("字号已生效，但设置保存失败");
+        });
+        auto *buttons=new QDialogButtonBox(QDialogButtonBox::RestoreDefaults|QDialogButtonBox::Close);layout->addRow(buttons);
+        connect(buttons->button(QDialogButtonBox::RestoreDefaults),&QPushButton::clicked,dialog,[size]{size->setValue(14);});
+        connect(buttons,&QDialogButtonBox::rejected,dialog,&QDialog::close);
+        dialog->open();size->setFocus();
+    }
+    QPair<int,int> selection() const {
+        if(previewAction->isChecked())return preview->sourceSelection();
+        const auto c=editor->textCursor();return {c.anchor(),c.position()};
+    }
+    void selectSource(int anchor,int position){
+        QTextCursor c(editor->document());c.setPosition(anchor);c.setPosition(position,QTextCursor::KeepAnchor);
+        editor->setTextCursor(c);
+        if(previewAction->isChecked()){render();preview->restoreSourceSelection(anchor,position);}
+        else editor->ensureCursorVisible();
+    }
+    void replaceSource(int start,int end,const QString &text,int anchor,int position){
+        QTextCursor c(editor->document());c.setPosition(start);c.setPosition(end,QTextCursor::KeepAnchor);
+        c.beginEditBlock();c.insertText(text);c.endEditBlock();selectSource(anchor,position);
+    }
+    void formatSelection(const QString &left,const QString &right){
+        const auto range=selection();int a=qMin(range.first,range.second),b=qMax(range.first,range.second);
+        const auto text=editor->toPlainText();
+        if(a>=left.size()&&text.mid(a-left.size(),left.size())==left&&text.mid(b,right.size())==right){
+            replaceSource(a-left.size(),b+right.size(),text.mid(a,b-a),a-left.size(),b-left.size());
+        }else{
+            replaceSource(a,b,left+text.mid(a,b-a)+right,a+left.size(),b+left.size());
+        }
+    }
+    void clipboardParagraph(bool cut){
+        const auto range=selection();int a=qMin(range.first,range.second),b=qMax(range.first,range.second);
+        const auto text=editor->toPlainText();
+        if(a==b){a=a?text.lastIndexOf('\n',a-1)+1:0;b=text.indexOf('\n',b);if(b<0)b=text.size();else ++b;}
+        QApplication::clipboard()->setText(text.mid(a,b-a));
+        if(cut)replaceSource(a,b,{},a,a);
+    }
+    void indentSelection(bool outdent){
+        const auto range=selection();int a=qMin(range.first,range.second),b=qMax(range.first,range.second);
+        const auto text=editor->toPlainText();
+        int start=a?text.lastIndexOf('\n',a-1)+1:0;
+        int last=b>a&&text[b-1]=='\n'?b-1:b;
+        int end=text.indexOf('\n',last);if(end<0)end=text.size();
+        auto lines=text.mid(start,end-start).split('\n');
+        int delta=0,firstDelta=0;
+        for(int i=0;i<lines.size();++i){
+            int d=4;
+            if(outdent){int n=0;if(lines[i].startsWith('\t'))n=1;else while(n<4&&n<lines[i].size()&&lines[i][n]==' ')++n;lines[i].remove(0,n);d=-n;}
+            else lines[i].prepend("    ");
+            if(i==0)firstDelta=d;delta+=d;
+        }
+        const int na=qMax(start,a+firstDelta),nb=qMax(na,b+delta);
+        replaceSource(start,end,lines.join('\n'),range.first<=range.second?na:nb,range.first<=range.second?nb:na);
+    }
+    void showFind(bool replace){
+        auto *dialog=new QDialog(this);dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(replace?"查找和替换":"查找");
+        auto *layout=new QFormLayout(dialog);auto *query=new QLineEdit;auto *replacement=new QLineEdit;
+        const auto r=selection();query->setText(editor->toPlainText().mid(qMin(r.first,r.second),qAbs(r.second-r.first)));
+        layout->addRow("查找",query);if(replace)layout->addRow("替换为",replacement);
+        auto *sensitive=new QCheckBox("区分大小写");layout->addRow(sensitive);
+        auto *message=new QLabel;layout->addRow(message);
+        auto find=[this,query,sensitive,message](bool backwards){
+            if(query->text().isEmpty())return;
+            const auto r=selection();QTextCursor from(editor->document());
+            from.setPosition(backwards?qMin(r.first,r.second):qMax(r.first,r.second));
+            QTextDocument::FindFlags flags;if(sensitive->isChecked())flags|=QTextDocument::FindCaseSensitively;
+            if(backwards)flags|=QTextDocument::FindBackward;
+            auto hit=editor->document()->find(query->text(),from,flags);
+            if(hit.isNull()){from.movePosition(backwards?QTextCursor::End:QTextCursor::Start);hit=editor->document()->find(query->text(),from,flags);}
+            message->setText(hit.isNull()?"未找到匹配项":"");
+            if(!hit.isNull())selectSource(hit.selectionStart(),hit.selectionEnd());
+        };
+        auto *next=new QPushButton("下一个");next->setDefault(true);layout->addRow(next);
+        connect(next,&QPushButton::clicked,dialog,[find]{find(false);});
+        auto *previous=new QPushButton("上一个");layout->addRow(previous);
+        connect(previous,&QPushButton::clicked,dialog,[find]{find(true);});
+        if(replace){
+            auto *one=new QPushButton("替换");layout->addRow(one);
+            connect(one,&QPushButton::clicked,dialog,[this,query,replacement,sensitive,find]{
+                const auto r=selection();const int a=qMin(r.first,r.second),b=qMax(r.first,r.second);
+                if(a!=b&&!query->text().isEmpty()&&editor->toPlainText().mid(a,b-a).compare(query->text(),sensitive->isChecked()?Qt::CaseSensitive:Qt::CaseInsensitive)==0)
+                    replaceSource(a,b,replacement->text(),a,a+replacement->text().size());
+                find(false);
+            });
+            auto *all=new QPushButton("全部替换");layout->addRow(all);
+            connect(all,&QPushButton::clicked,dialog,[this,query,replacement,sensitive,message]{
+                if(query->text().isEmpty())return;
+                const auto before=editor->toPlainText();auto after=before;
+                const auto cs=sensitive->isChecked()?Qt::CaseSensitive:Qt::CaseInsensitive;
+                int count=0;qsizetype offset=0;
+                while((offset=after.indexOf(query->text(),offset,cs))>=0){++count;offset+=query->text().size();}
+                after.replace(query->text(),replacement->text(),cs);
+                if(after!=before)replaceSource(0,before.size(),after,0,0);
+                message->setText(QString("已替换 %1 处").arg(count));
+            });
+        }
+        dialog->open();query->setFocus();query->selectAll();
     }
     void updateTitle(){
         const bool modified=editor->document()->isModified();
@@ -1471,11 +1671,22 @@ int main(int argc,char **argv){
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
 #endif
     QApplication app(argc,argv);app.setStyle("Fusion");
+    QFont applicationFont=app.font();
+    if(applicationFont.pointSizeF()>0)applicationFont.setPointSizeF(applicationFont.pointSizeF()+1);
+    else applicationFont.setPixelSize(applicationFont.pixelSize()+1);
+    app.setFont(applicationFont);
+    QCoreApplication::setOrganizationName("MdEdit");QCoreApplication::setApplicationName("MdEdit");
+    QTemporaryDir testSettings;
+    if(app.arguments().contains("--smoke-test")){
+        if(!testSettings.isValid())return 4;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,testSettings.path());
+    }
     app.styleHints()->setColorScheme(Qt::ColorScheme::Light);
     try{tex::LaTeX::init(formulaResourcePath().toStdString());}catch(const std::exception &e){QMessageBox::critical(nullptr,"公式引擎初始化失败",QString::fromUtf8(e.what()));return 3;}
     int result=0;
     if(app.arguments().contains("--smoke-test")){
-        QTextBrowser view;view.resize(900,700);view.setFont(QFont(previewFont,12));QStringList errors;
+        QTextBrowser view;view.resize(900,700);view.setFont(QFont(previewFont,13));QStringList errors;
         int n=renderMarkdown(view.document(),QString::fromUtf8(R"(# Test
 Inline $E=mc^2$ and $\frac{a}{b}$.
 
@@ -1543,6 +1754,58 @@ $$$$
         images=images&&centeredImage&&inlineImage;
         // Verify edits really reach the preview through the debounce timer.
         auto checkLive=[&](bool ok,int line){if(!ok){qWarning()<<"Live check failed at"<<line;QFile log(QDir::current().absoluteFilePath("live-failures.txt"));if(log.open(QIODevice::Append))log.write(QByteArray::number(line)+"\n");}return ok;};
+        {
+            Window commands;
+            auto *source=commands.findChild<QPlainTextEdit *>("markdownEditor");
+            auto *mode=commands.findChild<QAction *>("livePreviewAction");
+            for(bool liveMode:{true,false}){
+                mode->setChecked(liveMode);source->setPlainText("alpha\nbeta");
+                commands.selectSource(0,5);commands.formatSelection("**","**");
+                images=checkLive(source->toPlainText()=="**alpha**\nbeta"&&commands.selection()==qMakePair(2,7),__LINE__)&&images;
+                commands.formatSelection("**","**");
+                images=checkLive(source->toPlainText()=="alpha\nbeta",__LINE__)&&images;
+                commands.selectSource(0,6);commands.indentSelection(false);
+                images=checkLive(source->toPlainText()=="    alpha\nbeta"&&commands.selection()==qMakePair(4,10),__LINE__)&&images;
+                commands.indentSelection(true);
+                images=checkLive(source->toPlainText()=="alpha\nbeta",__LINE__)&&images;
+                commands.selectSource(7,7);commands.clipboardParagraph(true);
+                images=checkLive(source->toPlainText()=="alpha\n"&&QApplication::clipboard()->text()=="beta",__LINE__)&&images;
+                source->undo();commands.render();
+                images=checkLive(source->toPlainText()=="alpha\nbeta",__LINE__)&&images;
+            }
+        }
+        {
+            Window commands;
+            auto *source=commands.findChild<QPlainTextEdit *>("markdownEditor");
+            source->setPlainText("Alpha alpha");commands.selectSource(0,0);commands.showFind(true);
+            auto *dialog=commands.findChild<QDialog *>();
+            const auto fields=dialog->findChildren<QLineEdit *>();fields[0]->setText("alpha");fields[1]->setText("X");
+            auto click=[dialog](const QString &label){for(auto *button:dialog->findChildren<QPushButton *>())if(button->text()==label)button->click();};
+            click("下一个");images=checkLive(commands.selection()==qMakePair(0,5),__LINE__)&&images;
+            click("下一个");images=checkLive(commands.selection()==qMakePair(6,11),__LINE__)&&images;
+            click("下一个");images=checkLive(commands.selection()==qMakePair(0,5),__LINE__)&&images;
+            click("全部替换");images=checkLive(source->toPlainText()=="X X",__LINE__)&&images;
+            source->undo();images=checkLive(source->toPlainText()=="Alpha alpha",__LINE__)&&images;
+            dialog->close();
+        }
+        {
+            Window settingsWindow;
+            auto *source=settingsWindow.findChild<QPlainTextEdit *>("markdownEditor");
+            auto *liveView=static_cast<LiveEditor *>(settingsWindow.findChild<QTextBrowser *>("markdownPreview"));
+            source->setPlainText("# Heading\n\nBody");settingsWindow.selectSource(2,9);
+            source->document()->setModified(false);
+            settingsWindow.showSettings();
+            auto *dialog=settingsWindow.findChild<QDialog *>("settingsDialog");
+            auto *size=dialog->findChild<QSpinBox *>("baseFontSize");size->setValue(17);
+            images=checkLive(source->font().pointSize()==18&&liveView->font().pointSize()==17&&
+                source->toPlainText()=="# Heading\n\nBody"&&!source->document()->isModified()&&
+                settingsWindow.selection()==qMakePair(2,9),__LINE__)&&images;
+            const auto heading=liveView->document()->begin().begin().fragment().charFormat();
+            images=checkLive(heading.fontPointSize()==34&&!heading.hasProperty(QTextFormat::FontSizeAdjustment),__LINE__)&&images;
+            Window restored;
+            images=checkLive(restored.findChild<QTextBrowser *>("markdownPreview")->font().pointSize()==17,__LINE__)&&images;
+            dialog->close();QSettings().remove("appearance/baseFontSize");
+        }
         Window live;
         auto *edit=live.findChild<QPlainTextEdit *>("markdownEditor");
         auto *output=live.findChild<QTextBrowser *>("markdownPreview");
@@ -1724,13 +1987,15 @@ $$$$
             const auto expected=headingCharacters(level,output->font());
             const auto previewCharacters=output->document()->begin().begin().fragment().charFormat();
             images=checkLive(previewCharacters.fontPointSize()==expected.fontPointSize()&&
-                previewCharacters.fontPointSize()>output->font().pointSizeF(),__LINE__)&&images;
+                previewCharacters.fontPointSize()>output->font().pointSizeF()&&
+                !previewCharacters.hasProperty(QTextFormat::FontSizeAdjustment),__LINE__)&&images;
             caret=output->textCursor();caret.setPosition(0);output->setTextCursor(caret);
             for(int pos:{0,level+1}){
                 QTextCursor sample(output->document());sample.setPosition(pos);sample.movePosition(QTextCursor::NextCharacter,QTextCursor::KeepAnchor);
                 auto actual=sample.charFormat();
                 images=checkLive(actual.fontWeight()==expected.fontWeight()&&
-                    actual.fontPointSize()==expected.fontPointSize(),__LINE__)&&images;
+                    actual.fontPointSize()==expected.fontPointSize()&&
+                    !actual.hasProperty(QTextFormat::FontSizeAdjustment),__LINE__)&&images;
             }
             images=checkLive(edit->toPlainText()==heading+"\n\nBody",__LINE__)&&images;
         }
@@ -1794,10 +2059,13 @@ $$$$
         auto *fileDialog=live.findChild<QFileDialog *>();
         images=checkLive(fileDialog&&fileDialog->isVisible(),__LINE__)&&images;
         if(fileDialog){
-            fileDialog->selectFile(filename);
+            fileDialog->setDirectory(QFileInfo(filename).absolutePath());
+            settle(); // QFileSystemModel populates the directory asynchronously.
+            fileDialog->findChild<QLineEdit *>("fileNameEdit")->setText(filename);
+            settle();
             QMetaObject::invokeMethod(fileDialog,"accept",Qt::DirectConnection);
             settle();
-            images=checkLive(!openButton->isVisible()&&toolbar->isVisible()&&toolbar->actions().last()==toggle&&
+            images=checkLive(!openButton->isVisible()&&toolbar->isVisible()&&toolbar->actions().contains(toggle)&&
                 output->isVisible()&&!edit->document()->isModified(),__LINE__)&&images;
             images=checkLive(edit->toPlainText()==QString::fromUtf8(contents)&&
                 liveOutput->markdown()==edit->toPlainText()&&
@@ -1870,6 +2138,9 @@ $$$$
             const bool inlineImageReady=inlineImageFile.open()&&tallImage.save(&inlineImageFile,"PNG")&&inlineImageFile.flush();
             images=checkLive(inlineImageReady,__LINE__)&&images;
             const QString imageMarkup="Text ![image]("+QUrl::fromLocalFile(inlineImageFile.fileName()).toString(QUrl::FullyEncoded)+") after";
+            // Keep this baseline-stability fixture on one source line at all
+            // supported font sizes; wrapping is covered separately.
+            layoutProbe.resize(qMax(640,qCeil(QFontMetricsF(layoutProbe.font()).horizontalAdvance(imageMarkup))+100),480);
             for(const QString &middle:{QString("Body"),QString("# Heading"),QString("## `code`"),QString("First row\nSecond row"),
                     QString("Body **bold**"),QString("`code`"),QString("**bold**"),QString("_italic_"),
                     QString("`code` _italic_"),QString("~~strike~~ and `code`"),imageMarkup,QString(" \t")}){
@@ -2104,6 +2375,42 @@ $$$$
                     images=checkLive(probe.sourceSelection()==qMakePair(expected,expected),__LINE__)&&images;
                 }
             }
+            // Moving between differently styled blocks must preserve column zero.
+            for(const QString &text:{QString("plain\n\n# Heading\n\n> quote\n\n- item\n\nlast"),
+                    QString("# Heading\n\nplain\n\n## Smaller\n\nlast")}){
+                QList<int> starts{0};
+                for(int i=0;i<text.size();++i)if(text[i]=='\n')starts.append(i+1);
+                probe.setSource(text);
+                for(int direction:{1,-1}){
+                    const int first=direction==1?0:starts.size()-1;
+                    probe.restoreSourceSelection(starts[first],starts[first]);
+                    QKeyEvent arrow(QEvent::KeyPress,direction==1?Qt::Key_Down:Qt::Key_Up,Qt::NoModifier);
+                    for(int i=first+direction;i>=0&&i<starts.size();i+=direction){
+                        QApplication::sendEvent(&probe,&arrow);
+                        images=checkLive(probe.sourceSelection()==qMakePair(starts[i],starts[i])&&
+                            probe.markdown()==text,__LINE__)&&images;
+                    }
+                }
+            }
+            for(const QString &list:{QString("- **bold** tail"),QString("1. [link](https://example.com)"),
+                    QString("- parent\n  - [x] child $x$"),QString("- first\n  continuation\n- last")}){
+                probe.setSource(list);probe.restoreSourceSelection(list.size(),list.size());
+                QKeyEvent left(QEvent::KeyPress,Qt::Key_Left,Qt::NoModifier);
+                int previous=list.size();
+                for(int steps=0;steps<list.size()+2&&previous>0;++steps){
+                    QApplication::sendEvent(&probe,&left);const int now=probe.sourceSelection().second;
+                    images=checkLive(now<previous&&probe.markdown()==list,__LINE__)&&images;
+                    if(now>=previous)break;previous=now;
+                }
+                images=checkLive(probe.sourceSelection()==qMakePair(0,0),__LINE__)&&images;
+            }
+            probe.setSource("- item");probe.restoreSourceSelection(2,2);
+            QKeyEvent selectLeft(QEvent::KeyPress,Qt::Key_Left,Qt::ShiftModifier);
+            QApplication::sendEvent(&probe,&selectLeft);QApplication::sendEvent(&probe,&selectLeft);
+            images=checkLive(probe.sourceSelection()==qMakePair(2,0),__LINE__)&&images;
+            QKeyEvent replaceMarker(QEvent::KeyPress,Qt::Key_Plus,Qt::NoModifier,"+ ");
+            QApplication::sendEvent(&probe,&replaceMarker);
+            images=checkLive(probe.markdown()=="+ item",__LINE__)&&images;
             const QString uneven="- aaaaaa\n- a\n- aaaaaa";
             probe.setSource(uneven);probe.restoreSourceSelection(5,5);
             QKeyEvent down(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);
@@ -2223,7 +2530,7 @@ $$$$
             }
         }
         {
-            LiveEditor codePreview;codePreview.setFont(QFont(previewFont,12));codePreview.resize(760,560);
+            LiveEditor codePreview;codePreview.setFont(QFont(previewFont,13));codePreview.resize(760,560);
             codePreview.document()->setDocumentMargin(24);
             codePreview.setSource("# Code preview\n\n```cpp\n#include <iostream>\nint main() {\n    // $x$ stays literal\n    std::cout << \"Hello, Markdown!\";\n    return 0;\n}\n```\n\n```python\ndef square(x):\n    return x ** 2\n\nprint(square(5))\n```\n\nEnd");
             codePreview.grab().save(QDir::current().absoluteFilePath("code-smoke.png"));

@@ -120,3 +120,9 @@ ctest --preset macos-qt-debug
 字体资源从 vcpkg 安装目录部署到可执行文件旁的 `res`（macOS 为 `Contents/Resources/res`）；依赖许可证复制到 `licenses`。升级依赖请运行 `vcpkg x-update-baseline` 并重新验证。升级 MicroTeX 时需同时更新提交、SHA512 和兼容补丁。
 
 项目在 `vcpkg-configuration.json` 中明确使用官方 Git registry（`https://github.com/Microsoft/vcpkg`），并固定 baseline，避免本机针对小写组织名 URL 的镜像重定向导致 `not our ref`。需要能访问 GitHub；若仍失败，查看 `build-vcpkg/vcpkg-manifest-install.log`，不要移除版本锁定。
+
+## Obsidian 行为对照
+
+完整功能域、现有差异和待补项见 [Obsidian 行为对照](docs/obsidian-behavior-comparison.md)。新增“文件”和“编辑”菜单，支持打开、保存、加粗、斜体、行内代码、链接、段落复制/剪切、缩进、删除当前行及查找替换。快捷键中的 Ctrl 在 macOS 上对应 Cmd。当前查找为字面文本匹配，可区分大小写并循环查找；替换支持单次与全部，操作可撤销。菜单中的快捷键以实际平台显示为准。
+
+基础字号可在顶部“设置”按钮或“文件 → 设置”中调整（macOS 也可能显示在应用的设置菜单），快捷键 Ctrl/Cmd+,。支持 9–30 pt，默认 14 pt；即时更新正文、源码、界面和行号，标题按层级比例缩放。设置自动保存，重启后保留，并提供“恢复默认值”。
