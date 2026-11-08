@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 project(MdEdit VERSION 1.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-find_package(Qt6 6.12.0 CONFIG REQUIRED COMPONENTS Widgets Svg Pdf)
+find_package(Qt6 6.12.0 CONFIG REQUIRED COMPONENTS Widgets Svg Pdf PdfWidgets)
 find_package(MicroTeX CONFIG REQUIRED)
 qt_standard_project_setup()
 add_library(MdEditEditor STATIC
@@ -21,7 +21,7 @@ add_library(MdEditEditor STATIC
   src/editor/view/markdown_preview_widget.h src/editor/view/markdown_preview_widget.cpp)
 add_library(MdEdit::Editor ALIAS MdEditEditor)
 target_include_directories(MdEditEditor PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(MdEditEditor PUBLIC Qt6::Widgets Qt6::Svg Qt6::Pdf MicroTeX::MicroTeX)
+target_link_libraries(MdEditEditor PUBLIC Qt6::Widgets Qt6::Svg Qt6::Pdf Qt6::PdfWidgets MicroTeX::MicroTeX)
 qt_add_executable(MdEdit WIN32 MACOSX_BUNDLE
   src/main.cpp src/window.h src/window.cpp
   tests/app_tests.h tests/app_tests.cpp tests/table_edit_tests.cpp tests/pdf_tests.cpp)

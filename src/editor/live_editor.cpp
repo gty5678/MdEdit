@@ -5,8 +5,39 @@
 #include "render/renderer_registry.h"
 #include "tables/table_editor_dialog.h"
 #include <limits>
+#include <QPdfView>
+#include <QPdfDocument>
+#include <QPdfPageNavigator>
 
 namespace {
+class NestedPdfView final : public QPdfView {
+    QPointer<QAbstractScrollArea> outerArea;
+protected:
+    bool eventFilter(QObject *watched,QEvent *event) override {
+        if(watched==verticalScrollBar()&&event->type()==QEvent::Wheel){wheelEvent(static_cast<QWheelEvent*>(event));return true;}
+        return QPdfView::eventFilter(watched,event);
+    }
+    void wheelEvent(QWheelEvent *event) override {
+        const int delta=event->pixelDelta().isNull()?event->angleDelta().y():event->pixelDelta().y();
+        const auto *bar=verticalScrollBar();
+        const bool outward=(delta>0&&bar->value()<=bar->minimum())||(delta<0&&bar->value()>=bar->maximum());
+        if(outward&&outerArea&&event->modifiers()==Qt::NoModifier){
+            const qreal distance=event->pixelDelta().isNull()
+                ?event->angleDelta().y()/120.0*QApplication::wheelScrollLines()*QFontMetricsF(outerArea->font()).height()
+                :event->pixelDelta().y();
+            auto *outerBar=outerArea->verticalScrollBar();outerBar->setValue(outerBar->value()-qRound(distance));
+            event->accept();return;
+        }
+        if(!event->pixelDelta().isNull()&&event->modifiers()==Qt::NoModifier){
+            verticalScrollBar()->setValue(verticalScrollBar()->value()-event->pixelDelta().y());
+        }else QPdfView::wheelEvent(event);
+        // Never let an unconsumed event bubble to the document accidentally.
+        event->accept();
+    }
+public:
+    NestedPdfView(QAbstractScrollArea *outer,QWidget *parent):QPdfView(parent),outerArea(outer){verticalScrollBar()->installEventFilter(this);}
+    ~NestedPdfView() override {setDocument(nullptr);}
+};
 // All external image I/O goes through the same asynchronous cache as PDF/CSV.
 class ResourceTextDocument final : public QTextDocument {
     mdedit::ResourceManager &resources;
@@ -991,8 +1022,8 @@ QList<LiveEditor::BlockControls> LiveEditor::blockControls() const{
     QList<BlockControls> result;
     if(sourceExposed)return result;
     const QFontMetricsF metrics(font());
-    const qreal width=qMax(metrics.horizontalAdvance(QStringLiteral("打开原文件")),metrics.horizontalAdvance(QStringLiteral("编辑源码")))+16;
-    const qreal height=metrics.height()+10;
+    const qreal width=qBound(24.0,metrics.height()+4,30.0);
+    const qreal height=width;
     auto *layout=document()->documentLayout();
     for(int i=0;i<regions.size();++i){
         const auto &r=regions[i];
@@ -1198,6 +1229,27 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
         if(axisSource>=0&&axisIndex>=0&&!axisPressed&&(event->key()==Qt::Key_Delete||event->key()==Qt::Key_Backspace)){
             changeMarkdownTableAt(axisSource,axisRow?axisIndex:0,axisRow?0:axisIndex,axisRow?"removeRow":"removeColumn");axisSource=axisIndex=-1;event->accept();return;
         }
+        // A selected native table is a structural selection, not a cell edit.
+        if(textCursor().hasSelection()&&
+           (event->key()==Qt::Key_Backspace||event->key()==Qt::Key_Delete)){
+            const auto cursor=textCursor();
+            int start=-1,end=-1;
+            if(cursor.selectionStart()==0&&cursor.selectionEnd()==document()->characterCount()-1){
+                start=0;end=source.size();
+            }else if(cursor.currentTable()&&bindNativeTable(cursor)){
+                int row,count,column,columns;
+                cursor.selectedTableCells(&row,&count,&column,&columns);
+                if(row==0&&column==0&&count==nativeTable->rows()&&columns==nativeTable->columns()){
+                    start=nativeStart;end=nativeEnd;
+                }
+            }
+            if(start>=0){
+                source.remove(start,end-start);
+                rebuild(-1,0,start);
+                if(sourceChanged)sourceChanged(source);
+                event->accept();return;
+            }
+        }
         QScopedValueRollback<bool> verticalNavigation(movingVertically,event->key()==Qt::Key_Up||event->key()==Qt::Key_Down);
         if(textCursor().currentTable()&&bindNativeTable(textCursor())&&nativeSelection()){
             if(event->matches(QKeySequence::Undo)||event->matches(QKeySequence::Redo)){
@@ -1268,12 +1320,28 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
             event->accept();
             return;
         }
-        if(event->matches(QKeySequence::Undo)||event->matches(QKeySequence::Redo)){int at=sourcePosition(textCursor().position());
+        if(event->matches(QKeySequence::Undo)||event->matches(QKeySequence::Redo)){
             if(history)history(event->matches(QKeySequence::Redo));
-            for(int i=0;i<regions.size();++i)if(at>=regions[i].sourceStart&&(at<=regions[i].sourceEnd)){
-                rebuild(i,at-regions[i].sourceStart);break;
+            event->accept();return;
+        }
+        // A plain newline deletion has no grapheme or word-boundary rules to
+        // delegate to QTextControl. Apply it to the authoritative source before
+        // activating a region: activation and exposeSource would each rebuild
+        // the whole document before the final preview rebuild below.
+        if(!textCursor().hasSelection()&&event->modifiers()==Qt::NoModifier&&
+           (event->key()==Qt::Key_Backspace||event->key()==Qt::Key_Delete)){
+            const int at=sourcePosition(textCursor().position());
+            const int removeAt=event->key()==Qt::Key_Backspace?at-1:at;
+            if(removeAt>=0&&removeAt<source.size()&&source[removeAt]=='\n'){
+                source.remove(removeAt,1);
+                rebuild(-1,0,removeAt);
+                verticalScrollBar()->setValue(scrollBeforeEdit);
+                const QRect caret=cursorRect();
+                if(caret.top()<0||caret.bottom()>=viewport()->height())ensureCursorVisible();
+                if(sourceChanged)sourceChanged(source);
+                event->accept();return;
             }
-            return;}
+        }
         if(active<0)activateCaretRegion();
         if(active<0){event->ignore();return;}
         if((event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)&&
@@ -1413,6 +1481,7 @@ bool LiveEditor::viewportEvent(QEvent *event){
 }
 
 void LiveEditor::paintEvent(QPaintEvent *event){
+        syncPdfViews();
         // Paint one panel per source region, including the leading, trailing
         // and inter-line space that paragraph backgrounds leave uncovered.
         {
@@ -1489,11 +1558,33 @@ void LiveEditor::paintEvent(QPaintEvent *event){
             controls.restore();
         }
         for(const auto &item:blockControls()){
-            auto button=[&](const QRectF &rect,const QString &label,bool enabled){
-                controls.setPen(QColor("#d9cfe4"));controls.setBrush(QColor("#f5f2f8"));controls.drawRoundedRect(rect,4,4);
-                controls.setPen(QColor(enabled?"#655080":"#aaa3b2"));controls.drawText(rect,Qt::AlignCenter,label);
+            auto button=[&](const QRectF &rect,bool open,bool enabled){
+                const bool hovered=enabled&&rect.contains(tableHoverPoint);
+                controls.save();
+                controls.setPen(Qt::NoPen);
+                controls.setBrush(QColor(hovered?"#ddd8e5":"#efedf1"));
+                controls.drawRoundedRect(rect,6,6);
+                controls.translate(rect.center()-QPointF(8,8));
+                controls.setBrush(Qt::NoBrush);
+                controls.setPen(QPen(QColor(!enabled?"#aaa3b2":hovered?"#655080":"#82798d"),
+                                     1.5,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+                QPainterPath icon;
+                if(open){
+                    // Open the original file in its external application.
+                    icon.moveTo(7,3);icon.lineTo(3,3);icon.lineTo(3,13);
+                    icon.lineTo(13,13);icon.lineTo(13,9);
+                    icon.moveTo(9,2);icon.lineTo(14,2);icon.lineTo(14,7);
+                    icon.moveTo(14,2);icon.lineTo(7,9);
+                }else{
+                    // Source brackets and slash identify Markdown source editing.
+                    icon.moveTo(5,4);icon.lineTo(1,8);icon.lineTo(5,12);
+                    icon.moveTo(11,4);icon.lineTo(15,8);icon.lineTo(11,12);
+                    icon.moveTo(9.5,2.5);icon.lineTo(6.5,13.5);
+                }
+                controls.drawPath(icon);
+                controls.restore();
             };
-            button(item.open,"打开原文件",!item.file.isEmpty());button(item.edit,"编辑源码",true);
+            button(item.open,true,!item.file.isEmpty());button(item.edit,false,true);
         }
     }
 
@@ -1803,7 +1894,7 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
             const QString label=QStringLiteral("  📄  ")+QFileInfo(resolved.path()).fileName();
             cursor.insertText(QFontMetricsF(font()).elidedText(label,Qt::ElideMiddle,qMax(40,viewport()->width()-40)),link);
         }else if(!inlinePart&&resource){
-            const QString resourceKey=resourceManager.request(resolved,pdf?pdfPages.value(resolved):0);
+            const QString resourceKey=resourceManager.request(resolved);
             const auto *snapshot=resourceManager.lookup(resourceKey);
             const QString state=!snapshot?"loading":snapshot->error.isEmpty()?"ready":"error";
             const bool textResource=mdedit::ResourceResolver::isTextResource(resolved);
@@ -1825,20 +1916,7 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
                 QFontMetricsF(titleFont).elidedText(title,Qt::ElideRight,width-24));
             painter.restore();
             const QRectF content=picture?QRectF(0,0,width,height):QRectF(12,42,width-24,height-54);
-            if(pdf&&snapshot&&snapshot->error.isEmpty()&&!snapshot->image.isNull()){
-                // Fit the page to the panel width; the panel clips its vertical extent.
-                const qreal pageHeight=qreal(snapshot->image.height())*(content.width()-12)/snapshot->image.width();
-                const qreal maximum=qMax(qreal(0),pageHeight-content.height());
-                qreal &offset=pdfOffsets[resolved];offset=offset<0?maximum:qBound(qreal(0),offset,maximum);
-                painter.save();painter.setClipRect(content);
-                painter.setRenderHint(QPainter::SmoothPixmapTransform);
-                painter.drawImage(QRectF(content.left(),content.top()-offset,content.width()-12,pageHeight),snapshot->image);
-                painter.restore();
-                const QRectF track(content.right()-6,content.top(),4,content.height());
-                painter.fillRect(track,QColor("#e0dae7"));
-                const qreal thumb=qMax(qreal(24),content.height()*content.height()/qMax(content.height(),pageHeight));
-                painter.fillRect(QRectF(track.left(),track.top()+(maximum>0?offset/maximum:0)*(track.height()-thumb),4,thumb),QColor("#978ba7"));
-            }else if(snapshot)mdedit::RendererRegistry::paint(painter,*snapshot,content);
+            if(snapshot)mdedit::RendererRegistry::paint(painter,*snapshot,content);
             else painter.drawText(content,Qt::AlignCenter,pdf?"PDF 正在加载…":csv?"CSV 正在加载…":textResource?"文本正在加载…":"图片正在加载…");
             painter.end();
             const QUrl imageUrl((pdf?"pdf-":csv?"csv-":textResource?"text-":"image-")+state+":/"+QString::number(qHash(resourceKey)));
@@ -1846,20 +1924,14 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
             QTextImageFormat format;format.setName(imageUrl.toString());format.setWidth(width);format.setHeight(height);
             if(pdf)format.setProperty(QTextFormat::UserProperty+82,resolved);
             QTextCursor cursor(rendered);cursor.insertImage(format);
-            if(pdf||textResource){
+            if(textResource){
                 cursor.insertBlock();
                 auto link=[&](const QString &label,const QString &command){
                     QUrl action("mdedit-pdf:/"+command);QUrlQuery query;query.addQueryItem("file",resolved.toString());action.setQuery(query);
                     QTextCharFormat f;f.setAnchor(true);f.setAnchorHref(action.toString());f.setForeground(QColor("#655080"));f.setFontUnderline(true);
                     cursor.insertText(label,f);cursor.insertText("   ",QTextCharFormat());
                 };
-                const int page=snapshot?snapshot->page:pdfPages.value(resolved);
-                const int count=snapshot?snapshot->pageCount:0;
-                if(pdf&&count>0){
-                    if(page>0)link("上一页","previous");
-                    cursor.insertText(QString("第 %1 / %2 页   ").arg(page+1).arg(count),QTextCharFormat());
-                    if(page+1<count)link("下一页","next");
-                }
+
 
             }
         }else renderMarkdown(rendered,text,errors,true);
@@ -1916,51 +1988,6 @@ void LiveEditor::handlePdfAction(const QUrl &action){
     const QUrl file(QUrlQuery(action).queryItemValue("file",QUrl::FullyDecoded));
     if(!file.isLocalFile())return;
     if(action.path()=="/open"){QDesktopServices::openUrl(file);return;}
-    const auto *data=resourceManager.lookup(resourceManager.request(file,pdfPages.value(file)));
-    if(!data||data->pageCount<1)return;
-    const int page=qBound(0,data->page+(action.path()=="/next"?1:-1),data->pageCount-1);
-    if(page==data->page)return;
-    pdfPages[file]=page;pdfOffsets[file]=0;
-    refreshPdfPreview();
-}
-
-void LiveEditor::refreshPdfPreview(){
-    for(const auto &key:resourceRenderKeys)renderedMarkdown.remove(key);
-    resourceRenderKeys.clear();
-    const int chosen=active;
-    const int position=sourcePosition(textCursor().position());
-    QScopedValueRollback<bool> refreshing(backgroundRefresh,true);
-    rebuild(chosen,chosen>=0?position-regions[chosen].sourceStart:0);
-}
-
-void LiveEditor::wheelEvent(QWheelEvent *event){
-    if(event->modifiers()==Qt::NoModifier&&!sourceExposed){
-        for(auto block=document()->begin();block.isValid();block=block.next()){
-            const QRectF bounds=document()->documentLayout()->blockBoundingRect(block).translated(-horizontalScrollBar()->value(),-verticalScrollBar()->value());
-            if(event->position().y()<bounds.top()||event->position().y()>bounds.bottom())continue;
-            for(auto it=block.begin();!it.atEnd();++it){
-                const auto fragment=it.fragment();const auto format=fragment.charFormat();
-                if(!format.isImageFormat()||!format.hasProperty(QTextFormat::UserProperty+82))continue;
-                QTextCursor cursor(document());cursor.setPosition(fragment.position());
-                const auto image=format.toImageFormat();
-                const QRectF panel(cursorRect(cursor).left(),bounds.top(),image.width(),image.height());
-                if(!panel.contains(event->position()))continue;
-                const QUrl file=format.property(QTextFormat::UserProperty+82).toUrl();
-                const auto *data=resourceManager.lookup(resourceManager.request(file,pdfPages.value(file)));
-                event->accept();
-                if(!data||data->image.isNull()||!data->error.isEmpty())return;
-                const qreal delta=event->pixelDelta().isNull()?-event->angleDelta().y()/2.0:-event->pixelDelta().y();
-                if(qFuzzyIsNull(delta))return;
-                const qreal maximum=qMax(qreal(0),qreal(data->image.height())*(image.width()-36)/data->image.width()-(image.height()-54));
-                qreal &offset=pdfOffsets[file];
-                if(delta>0&&offset>=maximum&&data->page+1<data->pageCount){pdfPages[file]=data->page+1;offset=0;}
-                else if(delta<0&&offset<=0&&data->page>0){pdfPages[file]=data->page-1;offset=-1;}
-                else offset=qBound(qreal(0),offset+delta,maximum);
-                refreshPdfPreview();return;
-            }
-        }
-    }
-    NumberedEditor<QTextBrowser>::wheelEvent(event);
 }
 
 bool LiveEditor::editResourceSourceAt(int sourceOffset){
@@ -1970,4 +1997,48 @@ bool LiveEditor::editResourceSourceAt(int sourceOffset){
         }
     }
     return false;
+}
+
+void LiveEditor::syncPdfViews(){
+    QSet<QString> used;
+    if(!sourceExposed)for(auto block=document()->begin();block.isValid();block=block.next()){
+        const auto bounds=document()->documentLayout()->blockBoundingRect(block).translated(-horizontalScrollBar()->value(),-verticalScrollBar()->value());
+        for(auto it=block.begin();!it.atEnd();++it){
+            const auto fragment=it.fragment();const auto format=fragment.charFormat();
+            if(!format.isImageFormat()||!format.hasProperty(QTextFormat::UserProperty+82))continue;
+            const auto image=format.toImageFormat();const QUrl file=format.property(QTextFormat::UserProperty+82).toUrl();
+            const QString key=QString::number(sourcePosition(fragment.position()))+"|"+file.toString();
+            used.insert(key);
+            QTextCursor cursor(document());cursor.setPosition(fragment.position());
+            const QRect geometry=QRectF(cursorRect(cursor).left()+12,bounds.top()+42,image.width()-24,image.height()-54).toAlignedRect();
+            auto *panel=pdfViews.value(key);
+            if(!geometry.intersects(viewport()->rect())){if(panel)panel->hide();continue;}
+            if(!panel){
+                const auto *snapshot=resourceManager.lookup(resourceManager.request(file));
+                if(!snapshot||!snapshot->error.isEmpty()||!file.isLocalFile())continue;
+                panel=new QWidget(viewport());panel->setObjectName("pdfPreviewPanel");panel->setAutoFillBackground(true);
+                auto palette=panel->palette();palette.setColor(QPalette::Window,QColor("#f5f2f8"));panel->setPalette(palette);
+                auto *layout=new QVBoxLayout(panel);layout->setContentsMargins(0,0,0,0);layout->setSpacing(2);
+                auto *view=new NestedPdfView(this,panel);view->setObjectName("pdfViewer");
+                auto *doc=new QPdfDocument(view);
+                if(doc->load(file.toLocalFile())!=QPdfDocument::Error::None){delete panel;continue;}
+                view->setDocument(doc);view->setPageMode(QPdfView::PageMode::MultiPage);view->setZoomMode(QPdfView::ZoomMode::FitToWidth);
+                view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+                auto *toolbar=new QHBoxLayout;
+                auto *previous=new QPushButton("上一页",panel);auto *next=new QPushButton("下一页",panel);
+                auto *page=new QSpinBox(panel);page->setObjectName("pdfPageNumber");page->setRange(1,doc->pageCount());page->setPrefix("第 ");page->setSuffix(QString(" / %1 页").arg(doc->pageCount()));
+                toolbar->addWidget(previous);toolbar->addWidget(page);toolbar->addWidget(next);toolbar->addStretch();
+                layout->addLayout(toolbar);layout->addWidget(view);
+                connect(page,qOverload<int>(&QSpinBox::valueChanged),view,[view](int n){view->pageNavigator()->jump(n-1,QPointF());});
+                connect(view->pageNavigator(),&QPdfPageNavigator::currentPageChanged,page,[page](int n){QSignalBlocker guard(page);page->setValue(n+1);});
+                connect(previous,&QPushButton::clicked,page,[page]{page->setValue(page->value()-1);});
+                connect(next,&QPushButton::clicked,page,[page]{page->setValue(page->value()+1);});
+                pdfViews.insert(key,panel);
+            }
+            panel->setGeometry(geometry);panel->show();
+        }
+    }
+    for(auto it=pdfViews.begin();it!=pdfViews.end();){
+        if(!used.contains(it.key())){it.value()->deleteLater();it=pdfViews.erase(it);}else ++it;
+    }
 }

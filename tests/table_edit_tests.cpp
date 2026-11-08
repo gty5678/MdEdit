@@ -70,6 +70,23 @@ int runTableEditTests(){
     CHECK(!inlineTable->cellAt(1,0).firstCursorPosition().block().text().contains("$x^2$"));
     CHECK(widget.markdown().contains("**changed**"));
 
+    // Selecting every native cell removes the table as one undoable edit.
+    for(int key:{Qt::Key_Backspace,Qt::Key_Delete}){
+        widget.setMarkdown(original);
+        for(auto block=live->document()->begin();block.isValid();block=block.next())
+            if(QTextCursor(block).currentTable()){inlineTable=QTextCursor(block).currentTable();break;}
+        auto allCells=inlineTable->firstCursorPosition();
+        allCells.setPosition(inlineTable->lastPosition(),QTextCursor::KeepAnchor);
+        live->setTextCursor(allCells);
+        QKeyEvent remove(QEvent::KeyPress,key,Qt::NoModifier);QApplication::sendEvent(live,&remove);
+        CHECK(!widget.markdown().contains("|"));
+        CHECK(widget.markdown().contains("Before."));CHECK(widget.markdown().contains("After."));
+        widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+        live->selectAll();QApplication::sendEvent(live,&remove);
+        CHECK(widget.markdown().isEmpty());
+        widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    }
+
     widget.setMarkdown(original);
     live->restoreSourceSelection(original.indexOf("alpha"),original.indexOf("alpha"));CHECK(live->textCursor().currentTable());
     inlineTable=live->textCursor().currentTable();live->setTextCursor(inlineTable->cellAt(0,0).firstCursorPosition());

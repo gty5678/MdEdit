@@ -60,9 +60,8 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
     QSet<QString> resourceRenderKeys;
     mdedit::ResourceManager resourceManager;
     int resourceSourceEditStart=-1;
-    QHash<QUrl,int> pdfPages;
-    QHash<QUrl,qreal> pdfOffsets;
-    void refreshPdfPreview();
+    QHash<QString,QWidget*> pdfViews;
+    void syncPdfViews();
     void handlePdfAction(const QUrl &action);
     QFont renderedFont;
     QUrl renderedBaseUrl;
@@ -89,7 +88,7 @@ public:
 protected:
     bool viewportEvent(QEvent *event)override;
     void paintEvent(QPaintEvent *event)override;
-    void wheelEvent(QWheelEvent *event)override;
+
     void mouseMoveEvent(QMouseEvent *event)override;
     void mousePressEvent(QMouseEvent *event)override;
     void mouseReleaseEvent(QMouseEvent *event)override;

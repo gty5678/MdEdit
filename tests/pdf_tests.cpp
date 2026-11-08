@@ -1,5 +1,7 @@
 #include <QtWidgets>
 #include <QPdfWriter>
+#include <QPdfView>
+#include <QPdfPageNavigator>
 #include "editor/live_editor.h"
 #define CHECK(x) do {if(!(x)){qWarning()<<"PDF test failed"<<__LINE__<<#x;return 1;}}while(false)
 int runPdfTests(QApplication &app){
@@ -14,35 +16,31 @@ int runPdfTests(QApplication &app){
     CHECK(manager.lookup(first)->error.isEmpty());CHECK(manager.lookup(first)->pageCount==2);CHECK(manager.lookup(second)->page==1);CHECK(manager.lookup(last)->page==1);
     CHECK(!manager.lookup(first)->image.isNull());CHECK(manager.lookup(first)->image!=manager.lookup(second)->image);CHECK(!manager.lookup(invalid)->error.isEmpty());
     LiveEditor editor;editor.resize(900,800);editor.document()->setBaseUrl(QUrl::fromLocalFile(dir.path()+"/"));
-    const QString source="# PDF\n\n![Document](<示例 file.pdf>)\n\nAfter preview.\n";editor.setSource(source);editor.show();
+    const QString source=QString("# PDF\n\n![Document](<示例 file.pdf>)\n\nAfter preview.\n")+QString("More text.\n\n").repeated(40);editor.setSource(source);editor.show();editor.restoreSourceSelection(0,0);
     auto ready=[&]{for(auto b=editor.document()->begin();b.isValid();b=b.next())for(auto it=b.begin();!it.atEnd();++it)if(it.fragment().charFormat().isImageFormat()&&it.fragment().charFormat().toImageFormat().name().startsWith("pdf-ready:"))return true;return false;};
-    CHECK(wait(ready));CHECK(editor.markdown()==source);CHECK(editor.toPlainText().contains("1 / 2"));
-    auto clickLink=[&](const QString &command){
-        for(auto b=editor.document()->begin();b.isValid();b=b.next())for(auto it=b.begin();!it.atEnd();++it){auto f=it.fragment();if(QUrl(f.charFormat().anchorHref()).path()=="/"+command){
-            QTextCursor cursor(editor.document());cursor.setPosition(f.position()+1);editor.ensureCursorVisible();const QPoint pt=editor.cursorRect(cursor).center();
-            QMouseEvent press(QEvent::MouseButtonPress,pt,editor.viewport()->mapToGlobal(pt),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(editor.viewport(),&press);
-            QMouseEvent release(QEvent::MouseButtonRelease,pt,editor.viewport()->mapToGlobal(pt),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(editor.viewport(),&release);return true;
-        }}return false;
-    };
-    CHECK(clickLink("next"));CHECK(wait([&]{return ready()&&editor.toPlainText().contains("2 / 2");}));CHECK(editor.markdown()==source);
-    CHECK(clickLink("previous"));CHECK(wait([&]{return ready()&&editor.toPlainText().contains("1 / 2");}));
-    // Wheel inside the PDF scrolls its page, then crosses page boundaries.
-    auto wheelPdf=[&](int delta){
-        for(auto b=editor.document()->begin();b.isValid();b=b.next())for(auto it=b.begin();!it.atEnd();++it){
-            const auto f=it.fragment();if(!f.charFormat().hasProperty(QTextFormat::UserProperty+82))continue;
-            QTextCursor c(editor.document());c.setPosition(f.position());
-            const QPointF point(editor.cursorRect(c).left()+100,editor.document()->documentLayout()->blockBoundingRect(b).top()-editor.verticalScrollBar()->value()+100);
-            QWheelEvent event(point,editor.viewport()->mapToGlobal(point.toPoint()),QPoint(0,delta),QPoint(),Qt::NoButton,Qt::NoModifier,Qt::ScrollUpdate,false);
-            QApplication::sendEvent(editor.viewport(),&event);return true;
-        }return false;
-    };
+    CHECK(wait(ready));CHECK(editor.markdown()==source);
+    CHECK(wait([&]{return editor.findChild<QPdfView*>("pdfViewer")!=nullptr;}));
+    auto *view=editor.findChild<QPdfView*>("pdfViewer");auto *page=editor.findChild<QSpinBox*>("pdfPageNumber");CHECK(page&&page->maximum()==2);
     const int bodyScroll=editor.verticalScrollBar()->value();const auto selection=editor.sourceSelection();
-    CHECK(wheelPdf(-60));CHECK(editor.toPlainText().contains("1 / 2"));
-    CHECK(editor.verticalScrollBar()->value()==bodyScroll);CHECK(editor.sourceSelection()==selection);
-    CHECK(wheelPdf(-3000));CHECK(wheelPdf(-60));
-    CHECK(wait([&]{return ready()&&editor.toPlainText().contains("2 / 2");}));
-    CHECK(wheelPdf(60));CHECK(wait([&]{return ready()&&editor.toPlainText().contains("1 / 2");}));
-    CHECK(editor.markdown()==source);CHECK(editor.sourceSelection()==selection);CHECK(editor.verticalScrollBar()->value()==bodyScroll);
+    const int characters=editor.document()->characterCount();const int outerMaximum=editor.verticalScrollBar()->maximum();
+    CHECK(wait([&]{return view->verticalScrollBar()->maximum()>0;}));
+    auto *bar=view->verticalScrollBar();bar->setSliderDown(true);bar->setSliderPosition(bar->maximum()/2);bar->setSliderDown(false);
+    CHECK(bar->value()>0);CHECK(editor.verticalScrollBar()->value()==bodyScroll);
+    page->setValue(2);CHECK(wait([&]{return view->pageNavigator()->currentPage()==1;}));
+    page->setValue(1);CHECK(wait([&]{return view->pageNavigator()->currentPage()==0;}));
+    const QPointF point(100,100);
+    QWheelEvent wheel(point,view->viewport()->mapToGlobal(point.toPoint()),QPoint(0,-60),QPoint(),Qt::NoButton,Qt::NoModifier,Qt::ScrollUpdate,false);
+    QApplication::sendEvent(view->viewport(),&wheel);CHECK(bar->value()>0);
+    CHECK(editor.markdown()==source);CHECK(editor.sourceSelection()==selection);
+    CHECK(editor.document()->characterCount()==characters);CHECK(editor.verticalScrollBar()->maximum()==outerMaximum);CHECK(editor.verticalScrollBar()->value()==bodyScroll);
+    // Only an event that starts at a document edge transfers to the outer view.
+    editor.verticalScrollBar()->setValue(30);bar->setValue(0);
+    auto sendWheel=[&](int delta){QWheelEvent e(point,view->viewport()->mapToGlobal(point.toPoint()),QPoint(0,delta),QPoint(),Qt::NoButton,Qt::NoModifier,Qt::ScrollUpdate,false);QApplication::sendEvent(view->viewport(),&e);};
+    const int outerBefore=editor.verticalScrollBar()->value();sendWheel(20);CHECK(editor.verticalScrollBar()->value()<outerBefore);
+    editor.verticalScrollBar()->setValue(30);bar->setValue(bar->maximum()-1);sendWheel(-60);
+    CHECK(editor.verticalScrollBar()->value()==30);CHECK(bar->value()==bar->maximum());
+    sendWheel(-20);CHECK(editor.verticalScrollBar()->value()>30);
+    editor.verticalScrollBar()->setValue(0);
     auto followingTop=[&]{for(auto b=editor.document()->begin();b.isValid();b=b.next())if(b.text().contains("After preview"))return editor.document()->documentLayout()->blockBoundingRect(b).top();return qreal(-1);};
     const qreal before=followingTop();
     editor.restoreSourceSelection(source.indexOf("!["),source.indexOf("!["));CHECK(ready());
@@ -64,7 +62,7 @@ int runPdfTests(QApplication &app){
     scrolling.verticalScrollBar()->setValue(500);
     const int scrollBefore=scrolling.verticalScrollBar()->value();
     const auto caretBefore=scrolling.sourceSelection();
-    CHECK(wait([&]{return scrolling.toPlainText().contains("1 / 2");}));
+    CHECK(wait([&]{for(auto b=scrolling.document()->begin();b.isValid();b=b.next())for(auto it=b.begin();!it.atEnd();++it)if(it.fragment().charFormat().isImageFormat()&&it.fragment().charFormat().toImageFormat().name().startsWith("pdf-ready:"))return true;return false;}));
     CHECK(qAbs(scrolling.verticalScrollBar()->value()-scrollBefore)<3);
     // Document rebuilds may clamp the bar temporarily, but never leave the
     // editor at the offscreen caret after the asynchronous publication.

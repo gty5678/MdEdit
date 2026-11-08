@@ -15,7 +15,9 @@ public:
     bool supports(const ResourceSnapshot &data) const override{return data.text.has_value();}
     void paint(QPainter &painter,const ResourceSnapshot &data,const QRectF &content) const override {
         painter.save();painter.setClipRect(content,Qt::IntersectClip);
-        painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        QFont textFont=QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        textFont.setPointSizeF(painter.font().pointSizeF());
+        painter.setFont(textFont);
         painter.setPen(QColor("#26232d"));
         const QFontMetricsF metrics(painter.font());
         const auto lines=data.text->split('\n');

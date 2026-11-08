@@ -19,7 +19,24 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
             QTextCursor c(editor->document());c.setPosition(begin);c.setPosition(oldEnd,QTextCursor::KeepAnchor);
             c.insertText(text.mid(begin,newEnd-begin));
         };
-        preview->history=[this](bool redo){if(redo)editor->redo();else editor->undo();render();};
+        preview->history=[this](bool redo){
+            auto *doc=editor->document();
+            if(redo?!doc->isRedoAvailable():!doc->isUndoAvailable())return;
+            const int scroll=preview->verticalScrollBar()->value();
+            const int horizontal=preview->horizontalScrollBar()->value();
+            const bool updates=preview->updatesEnabled();
+            preview->setUpdatesEnabled(false);
+            // The document returns the history operation's caret. The hidden
+            // source editor's cursor does not track live edits reliably.
+            QTextCursor caret(doc);
+            if(redo)doc->redo(&caret);else doc->undo(&caret);
+            editor->setTextCursor(caret);
+            timer.stop();render();
+            preview->restoreSourceSelection(caret.anchor(),caret.position());
+            preview->verticalScrollBar()->setValue(scroll);
+            preview->horizontalScrollBar()->setValue(horizontal);
+            preview->setUpdatesEnabled(updates);
+        };
         connect(editor,&QPlainTextEdit::textChanged,this,[this]{timer.start();emit textChanged();});
         connect(editor->document(),&QTextDocument::modificationChanged,this,&MarkdownEditorWidget::modificationChanged);
         connect(&timer,&QTimer::timeout,this,[this]{if(isLiveMode())render();});
@@ -93,7 +110,7 @@ void MarkdownEditorWidget::applyBaseFontSize(int size){
         setFont(ui);
         editor->setFont(QFont(editorFont,baseFontSize+1));
         editor->setTabStopDistance(QFontMetricsF(editor->font()).horizontalAdvance(' ')*4);
-        preview->setFont(QFont(previewFont,baseFontSize));
+        preview->setFont(QFont(previewFont,baseFontSize+2));
         preview->refreshAppearance();
         static_cast<NumberedEditor<QPlainTextEdit> *>(editor)->refreshLineNumbers();
         preview->refreshLineNumbers();

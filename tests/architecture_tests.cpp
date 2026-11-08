@@ -29,6 +29,28 @@ int main(int argc,char **argv){
     lazy.restoreSourceSelection(tail,tail+9);
     CHECK(lazy.sourceSelection()==qMakePair(tail,tail+9));
     CHECK(lazy.markdown()==large);
+    // Removing blank lines must publish one source edit without exposing the
+    // entire Markdown document to QTextControl as an intermediate plain view.
+    for(int key:{Qt::Key_Backspace,Qt::Key_Delete}){
+        LiveEditor blankLines;blankLines.resize(900,700);
+        QString expected="# Heading\n\n\n\nBody **bold**\n\n```cpp\nint value;\n```\n";
+        blankLines.setSource(expected);
+        int position=key==Qt::Key_Backspace?expected.indexOf("Body"):expected.indexOf('\n')+1;
+        blankLines.restoreSourceSelection(position,position);
+        int published=0,intermediate=0;
+        blankLines.sourceChanged=[&](const QString &){++published;};
+        QObject::connect(&blankLines,&QTextEdit::textChanged,[&]{++intermediate;});
+        for(int i=0;i<3;++i){
+            const int removed=key==Qt::Key_Backspace?position-1:position;
+            expected.remove(removed,1);position=removed;
+            QKeyEvent remove(QEvent::KeyPress,key,Qt::NoModifier);
+            QApplication::sendEvent(&blankLines,&remove);
+            CHECK(blankLines.markdown()==expected);
+            CHECK(blankLines.sourceSelection()==qMakePair(position,position));
+            CHECK(!blankLines.toPlainText().contains("**bold**"));
+        }
+        CHECK(published==3);CHECK(intermediate==0);
+    }
     QTemporaryDir dir;CHECK(dir.isValid());
     QFile csv(dir.filePath("data file.csv"));CHECK(csv.open(QIODevice::WriteOnly));
     csv.write("name,value\n\"hello, world\",\"a\"\"b\"\n");csv.close();
@@ -133,7 +155,7 @@ int main(int argc,char **argv){
     // The top-right action exposes the attachment source without modifying it.
     for(auto b=images.document()->begin();b.isValid();b=b.next())if(b.text().contains(QChar::ObjectReplacementCharacter)){
         const auto bounds=images.document()->documentLayout()->blockBoundingRect(b);
-        const qreal width=qMax(QFontMetricsF(images.font()).horizontalAdvance(QStringLiteral("打开原文件")),QFontMetricsF(images.font()).horizontalAdvance(QStringLiteral("编辑源码")))+16;
+        const qreal width=qBound(24.0,QFontMetricsF(images.font()).height()+4,30.0);
         const QPointF pt(qMin(qreal(images.viewport()->width()-8),bounds.right())-width/2,bounds.top()-images.verticalScrollBar()->value()+8);
         QMouseEvent press(QEvent::MouseButtonPress,pt,images.viewport()->mapToGlobal(pt.toPoint()),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
         QApplication::sendEvent(images.viewport(),&press);break;
@@ -178,5 +200,27 @@ int main(int argc,char **argv){
     widget.document()->undo();CHECK(widget.markdown()==source);
     widget.setLiveMode(false);CHECK(!widget.isLiveMode());CHECK(widget.markdown()==source);
     widget.setLiveMode(true);widget.setLiveMode(false);CHECK(widget.markdown()==source);
+    // History keeps a scrolled viewport stable and restores the actual edit caret.
+    widget.setMarkdown(large);widget.setLiveMode(true);
+    auto *live=dynamic_cast<LiveEditor *>(widget.findChild<QTextBrowser *>("markdownPreview"));CHECK(live);
+    const int editAt=large.indexOf("token750");
+    widget.replaceSource(editAt,editAt,"XYZ",editAt+3,editAt+3);
+    app.processEvents();
+    const int historyScroll=live->verticalScrollBar()->value();
+    auto historyKey=[&](QKeySequence::StandardKey key){
+        const auto combination=QKeySequence(key)[0];
+        QKeyEvent event(QEvent::KeyPress,combination.key(),combination.keyboardModifiers());
+        QApplication::sendEvent(live,&event);
+    };
+    historyKey(QKeySequence::Undo);
+    CHECK(widget.markdown()==large);
+    CHECK(live->sourceSelection()==qMakePair(editAt,editAt));
+    CHECK(live->verticalScrollBar()->value()==historyScroll);
+    historyKey(QKeySequence::Redo);
+    CHECK(widget.markdown().mid(editAt,3)=="XYZ");
+    CHECK(live->sourceSelection()==qMakePair(editAt+3,editAt+3));
+    CHECK(live->verticalScrollBar()->value()==historyScroll);
+    app.processEvents();
+    CHECK(live->verticalScrollBar()->value()==historyScroll);
     return 0;
 }
