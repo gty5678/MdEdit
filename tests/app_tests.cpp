@@ -4,7 +4,329 @@
 #include "markdown/renderer.h"
 #include "markdown/scanner.h"
 
+int runTableEditTests();
+int runPdfTests(QApplication &app);
+
 std::optional<int> runAppTests(QApplication &app){
+    if(app.arguments().contains("--live-pdf-test"))return runPdfTests(app);
+    if(app.arguments().contains("--table-edit-test"))return runTableEditTests();
+    if(app.arguments().contains("--live-csv-test")){
+        QTemporaryDir files;if(!files.isValid())return 1;
+        QFile file(files.filePath("sample.csv"));if(!file.open(QIODevice::WriteOnly))return 2;
+        file.write("name,value,notes\nConcrete,128,\"hello, world\"\nSteel,12.5,\"sample \"\"A-01\"\"\"\n");file.close();
+        LiveEditor editor;editor.resize(900,500);
+        editor.document()->setBaseUrl(QUrl::fromLocalFile(files.path()+"/"));
+        const QString source=QString::fromUtf8("# CSV 表格预览\n\n![工程材料](sample.csv)\n\n这里继续 Live 编辑。\n");
+        editor.setSource(source);editor.show();
+        auto imageState=[&](const QString &scheme){
+            for(auto block=editor.document()->begin();block.isValid();block=block.next())
+                for(auto it=block.begin();!it.atEnd();++it){
+                    const auto format=it.fragment().charFormat();
+                    if(format.isImageFormat()&&QUrl(format.toImageFormat().name()).scheme()==scheme)return true;
+                }
+            return false;
+        };
+        QElapsedTimer elapsed;elapsed.start();
+        while(!imageState("csv-ready")&&elapsed.elapsed()<5000){app.processEvents();QThread::msleep(1);}
+        if(!imageState("csv-ready")||editor.markdown()!=source)return 3;
+        auto csvCursor=[&]{
+            for(auto block=editor.document()->begin();block.isValid();block=block.next())
+                for(auto it=block.begin();!it.atEnd();++it)
+                    if(it.fragment().charFormat().isImageFormat()){
+                        QTextCursor cursor(editor.document());cursor.setPosition(it.fragment().position());return cursor;
+                    }
+            return QTextCursor();
+        };
+        auto followingTop=[&]{
+            for(auto block=editor.document()->begin();block.isValid();block=block.next())
+                if(block.text().contains(QString::fromUtf8("这里继续")))return editor.document()->documentLayout()->blockBoundingRect(block).top();
+            return qreal(-1);
+        };
+        for(int repeat=0;repeat<3;++repeat){
+            editor.restoreSourceSelection(0,0);
+            auto cursor=csvCursor();if(cursor.isNull())return 7;
+            const qreal before=followingTop();
+            editor.setTextCursor(cursor);app.processEvents();
+            if(!imageState("csv-ready"))return 14;
+            if(!editor.editResourceSourceAt(source.indexOf("![")))return 15;
+            if(!editor.toPlainText().contains("![工程材料](sample.csv)"))return 8;
+            if(qAbs(followingTop()-before)>2){qWarning()<<"CSV layout shift"<<before<<followingTop();return 9;}
+            editor.restoreSourceSelection(0,0);
+            if(!imageState("csv-ready")||qAbs(followingTop()-before)>2||editor.markdown()!=source)return 10;
+        }
+        editor.editResourceSourceAt(source.indexOf("!["));
+        if(!editor.toPlainText().contains("![工程材料](sample.csv)"))return 4;
+        editor.restoreSourceSelection(0,0);
+        if(!imageState("csv-ready")||editor.markdown()!=source)return 5;
+        editor.insertPlainText("X");if(!editor.markdown().startsWith("X#"))return 6;
+        const QString longSource=QString("Before paragraph.\n\n").repeated(30)+
+            "![工程材料](sample.csv)\n\nAfter resource.\n\nLast paragraph.\n";
+        editor.setSource(longSource);editor.restoreSourceSelection(0,0);app.processEvents();
+        for(int repeat=0;repeat<3;++repeat){
+            editor.verticalScrollBar()->setValue(editor.verticalScrollBar()->maximum());
+            const int scroll=editor.verticalScrollBar()->value();
+            auto cursor=csvCursor();if(cursor.isNull())return 11;
+            const QPoint point=editor.cursorRect(cursor).center()+QPoint(8,0);
+            QMouseEvent click(QEvent::MouseButtonPress,point,editor.viewport()->mapToGlobal(point),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(editor.viewport(),&click);app.processEvents();
+            if(!imageState("csv-ready"))return 16;
+            editor.editResourceSourceAt(longSource.indexOf("!["));
+            if(!editor.toPlainText().contains("![工程材料](sample.csv)")||qAbs(editor.verticalScrollBar()->value()-scroll)>2)return 12;
+            editor.restoreSourceSelection(longSource.indexOf("After resource"),longSource.indexOf("After resource"));
+            if(!imageState("csv-ready")||qAbs(editor.verticalScrollBar()->value()-scroll)>2||editor.markdown()!=longSource)return 13;
+        }
+        return 0;
+    }
+
+    if(app.arguments().contains("--typing-style-test")){
+        auto send=[](LiveEditor &editor,int key,const QString &text=QString()){
+            QKeyEvent event(QEvent::KeyPress,key,Qt::NoModifier,text);QApplication::sendEvent(&editor,&event);
+        };
+        auto at=[](LiveEditor &editor,int position){
+            QTextCursor cursor(editor.document());cursor.setPosition(position);
+            cursor.setPosition(position+1,QTextCursor::KeepAnchor);return cursor.charFormat();
+        };
+        auto plain=[](const QTextCharFormat &format){
+            return !format.fontItalic()&&format.fontWeight()!=QFont::Bold&&!format.fontStrikeOut()&&
+                format.background().color()!=highlightBackground;
+        };
+        for(const auto &delimiter:{QString("*"),QString("**"),QString("***"),QString("_"),QString("__"),QString("___"),QString("~~"),QString("==")}){
+            LiveEditor editor;editor.setSource("plain ");editor.restoreSourceSelection(6,6);
+            QString expected="plain ";
+            auto type=[&](const QString &text){
+                for(const auto ch:text){send(editor,0,QString(ch));expected+=ch;}
+                return editor.markdown()==expected;
+            };
+            if(!type(delimiter))return 80;
+            for(const auto ch:QString::fromUtf8("a中文b")){
+                if(!type(QString(ch)))return 81;
+                const auto format=at(editor,editor.textCursor().position()-1);
+                const bool emphasis=delimiter[0]=='*'||delimiter[0]=='_';
+                if(format.fontItalic()!=(emphasis&&delimiter.size()!=2)||
+                   (format.fontWeight()==QFont::Bold)!=(emphasis&&delimiter.size()>=2)||
+                   format.fontStrikeOut()!=(delimiter=="~~")||
+                   (format.background().color()==highlightBackground)!=(delimiter=="==")){
+                    qWarning()<<"Typing style mismatch"<<delimiter<<expected;return 82;
+                }
+            }
+            if(!type(delimiter)||!type(" normal"))return 83;
+            if(!plain(at(editor,editor.textCursor().position()-1)))return 84;
+            // Returning to an existing preview span must also style its source.
+            editor.restoreSourceSelection(0,0);editor.restoreSourceSelection(6+delimiter.size()+1,6+delimiter.size()+1);
+            const auto existing=at(editor,editor.textCursor().position());
+            if(delimiter=="*"&&!existing.fontItalic())return 85;
+            // An unfinished delimiter ends at Enter, not at the next paragraph.
+            editor.setSource("plain ");editor.restoreSourceSelection(6,6);expected="plain ";
+            if(!type(delimiter+"text"))return 86;
+            send(editor,Qt::Key_Return,"\n");expected+='\n';
+            if(!type("next")||!plain(at(editor,editor.textCursor().position()-1)))return 87;
+        }
+        LiveEditor editor;
+        for(const auto &source:{QString("\\*literal"),QString("* item"),QString("`*code*`"),QString("```\n*code*\n```"),QString("$a*b$"),QString("snake_case")}){
+            editor.setSource(source);editor.restoreSourceSelection(source.indexOf("code")>=0?source.indexOf("code"):0,source.indexOf("code")>=0?source.indexOf("code"):0);
+            const auto hit=editor.document()->find(source.contains("code")?"code":source.contains("literal")?"literal":source.contains("item")?"item":source.contains("snake")?"snake":"a");
+            if(!hit.isNull()&&!plain(hit.charFormat()))return 88;
+        }
+        editor.setSource("*text*");editor.restoreSourceSelection(6,6);
+        send(editor,Qt::Key_Backspace);
+        if(editor.markdown()!="*text"||!editor.document()->find("text").charFormat().fontItalic())return 89;
+        send(editor,0,"x");
+        if(editor.markdown()!="*textx"||!at(editor,editor.textCursor().position()-1).fontItalic())return 90;
+        // Nested styles combine, then unwind independently when closed.
+        editor.setSource("**bold *both* bold** plain");editor.restoreSourceSelection(10,10);
+        auto both=editor.document()->find("both").charFormat();
+        if(!both.fontItalic()||both.fontWeight()!=QFont::Bold||
+           editor.document()->find("plain").charFormat().fontWeight()==QFont::Bold)return 95;
+        editor.setSource("==**marked");editor.restoreSourceSelection(10,10);
+        auto combined=editor.document()->find("marked").charFormat();
+        if(combined.fontWeight()!=QFont::Bold||combined.background().color()!=highlightBackground)return 96;
+        // Input-method commits receive the same styling as ordinary keystrokes.
+        editor.setSource("==");editor.restoreSourceSelection(2,2);
+        QInputMethodEvent commit;commit.setCommitString(QString::fromUtf8("中文"));QApplication::sendEvent(&editor,&commit);
+        if(editor.markdown()!=QString::fromUtf8("==中文")||at(editor,3).background().color()!=highlightBackground)return 91;
+        // Multiline insertion never carries an unfinished style past a newline.
+        editor.setSource("*");editor.restoreSourceSelection(1,1);editor.insertPlainText("first\nsecond");
+        if(editor.markdown()!="*first\nsecond"||!plain(editor.document()->find("second").charFormat()))return 92;
+        MarkdownEditorWidget widget;widget.setMarkdown("*");widget.selectSource(1,1);
+        auto *live=static_cast<LiveEditor *>(widget.findChild<QTextBrowser *>("markdownPreview"));
+        send(*live,0,"x");const QString edited=widget.markdown();
+        widget.document()->undo();widget.render();widget.selectSource(widget.markdown().size(),widget.markdown().size());
+        if(widget.markdown()==edited||live->markdown()!=widget.markdown())return 93;
+        widget.document()->redo();widget.render();widget.selectSource(edited.size(),edited.size());
+        if(widget.markdown()!=edited||!live->document()->find("x").charFormat().fontItalic())return 94;
+        return 0;
+    }
+    if(app.arguments().contains("--highlight-test")){
+        QTextDocument doc;QStringList errors;
+        const QString source="before ==yellow== after ==**bold**== and ==*italic*== and ==~~deleted~~==";
+        renderMarkdown(&doc,source,errors);
+        if(!errors.isEmpty()||doc.toPlainText()!="before yellow after bold and italic and deleted"){qWarning()<<doc.toPlainText()<<errors;return 60;}
+        for(const auto &word:{QString("yellow"),QString("bold"),QString("italic"),QString("deleted")}){
+            const auto found=doc.find(word);
+            if(found.isNull()||found.charFormat().background().color()!=highlightBackground)return 61;
+        }
+        if(doc.find("bold").charFormat().fontWeight()!=QFont::Bold||
+           !doc.find("italic").charFormat().fontItalic()||!doc.find("deleted").charFormat().fontStrikeOut()||
+           doc.find("after").charFormat().background().style()!=Qt::NoBrush)return 62;
+        for(const auto &literal:{QString("`==code==`"),QString("```\n==code==\n```"),
+              QString("    ==code=="),QString("\\==escaped=="),QString("==unfinished"),QString("===="),QString("===literal===")}){
+            renderMarkdown(&doc,literal,errors);
+            if(!doc.toPlainText().contains("=="))return 63;
+            for(auto block=doc.begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it)
+                if(it.fragment().charFormat().background().color()==highlightBackground)return 64;
+        }
+        for(const auto &mixed:{QString("==***nested***=="),QString("**==nested==**"),QString("==first== ==second==")}){
+            renderMarkdown(&doc,mixed,errors);
+            if(doc.toPlainText().contains("==")||doc.toPlainText().contains("*"))return 69;
+        }
+        QTextDocument code;code.setPlainText("==yellow==\n```\n==code==\n```\n==**bold**==");
+        Highlighter syntax(&code);syntax.rehighlight();
+        auto marked=[&](int row){
+            for(const auto &format:code.findBlockByNumber(row).layout()->formats())
+                if(format.format.background().color()==highlightBackground)return true;
+            return false;
+        };
+        if(!marked(0)||marked(2)||!marked(4))return 70;
+        LiveEditor editor;editor.resize(800,500);editor.setSource(source);
+        if(editor.toPlainText()!= "before yellow after bold and italic and deleted")return 65;
+        editor.restoreSourceSelection(11,11);
+        if(!editor.toPlainText().contains("==yellow==")||editor.markdown()!=source)return 66;
+        QKeyEvent typing(QEvent::KeyPress,Qt::Key_X,Qt::NoModifier,"x");
+        QApplication::sendEvent(&editor,&typing);
+        QString expected=source;expected.insert(11,"x");
+        if(editor.markdown()!=expected)return 67;
+        editor.restoreSourceSelection(0,0);
+        if(editor.toPlainText().contains("==")||editor.markdown()!=expected)return 68;
+        return 0;
+    }
+    if(app.arguments().contains("--line-spacing-test")){
+        LiveEditor editor;editor.resize(900,700);editor.show();
+        const QString source="alpha\nbeta\n\n \n\n**bold** text\nomega\n";
+        for(int size:{9,14,24}){
+            editor.setFont(QFont(previewFont,size));editor.setSource(source);editor.refreshAppearance();
+            auto verify=[&]{
+                auto *layout=editor.document()->documentLayout();
+                const qreal expected=bodyLineHeight(editor.font());
+                qreal previous=-1;
+                for(auto block=editor.document()->begin();block.isValid();block=block.next()){
+                    const auto rect=layout->blockBoundingRect(block);
+                    if(previous>=0&&qAbs(rect.top()-previous-expected)>1){
+                        qWarning()<<"Uneven line spacing"<<size<<block.blockNumber()<<rect.top()-previous<<expected;
+                        return false;
+                    }
+                    previous=rect.top();
+                }
+                return editor.markdown()==source;
+            };
+            if(!verify())return 50;
+            for(int at=0;at<source.size();++at)if(at==0||source[at-1]=='\n'){
+                editor.restoreSourceSelection(at,at);
+                if(!verify())return 51;
+            }
+        }
+        return 0;
+    }
+    if(app.arguments().contains("--formula-vector-test")){
+        QTextDocument original,vector,raster;QStringList errors;
+        original.setDefaultFont(QFont(previewFont,14));
+        if(renderMarkdown(&original,R"($E=mc^2$ and $x_i^2$
+
+$$\frac{1}{2}+\sqrt{x}+\int_0^1 x^2\,dx$$)",errors)!=3||!errors.isEmpty())return 40;
+        for(auto *doc:{&vector,&raster}){
+            doc->setDefaultFont(original.defaultFont());
+            installFormulaImageHandler(doc);
+            QTextCursor(doc).insertFragment(QTextDocumentFragment(&original));
+            doc->setTextWidth(600);
+        }
+        int count=0;
+        for(auto block=raster.begin();block.isValid();block=block.next())
+            for(auto it=block.begin();!it.atEnd();++it){
+                const auto fragment=it.fragment();auto format=fragment.charFormat();
+                if(!format.isImageFormat())continue;
+                if(!format.hasProperty(formulaVector))return 41;
+                ++count;
+                const QUrl url(format.toImageFormat().name());
+                raster.addResource(QTextDocument::ImageResource,url,original.resource(QTextDocument::ImageResource,url));
+                format.clearProperty(formulaVector);format.clearProperty(formulaVectorSize);
+                QTextCursor cursor(&raster);cursor.setPosition(fragment.position());
+                cursor.setPosition(fragment.position()+fragment.length(),QTextCursor::KeepAnchor);cursor.setCharFormat(format);
+            }
+        if(count!=3)return 42;
+        for(int dpr:{1,2,3}){
+            QList<QRect> bounds;
+            for(auto *doc:{&vector,&raster}){
+                QImage image(QSize(600*dpr,200*dpr),QImage::Format_ARGB32_Premultiplied);
+                image.setDevicePixelRatio(dpr);image.fill(Qt::white);
+                QPainter painter(&image);doc->drawContents(&painter);painter.end();
+                QRect ink;
+                for(int y=0;y<image.height();++y)for(int x=0;x<image.width();++x)
+                    if(qGray(image.pixel(x,y))<200)ink=ink.united(QRect(x,y,1,1));
+                bounds.append(ink);
+                if(doc==&vector&&dpr==2)image.save("formula-vector.png");
+            }
+            if(bounds[0].isEmpty()||qAbs(bounds[0].right()-bounds[1].right())>3*dpr||
+               qAbs(bounds[0].bottom()-bounds[1].bottom())>3*dpr)return 43;
+        }
+        return 0;
+    }
+    if(app.arguments().contains("--performance-test")){
+        QFile file(app.arguments().value(app.arguments().indexOf("--performance-test")+1));
+        if(!file.open(QIODevice::ReadOnly))return 30;
+        const QString source=QString::fromUtf8(file.readAll());
+        LiveEditor editor;editor.resize(900,700);editor.show();
+        QElapsedTimer timer;timer.start();editor.setSource(source);app.processEvents();
+        const auto load=timer.elapsed();
+        timer.restart();
+        for(int i=0;i<12;++i){
+            editor.restoreSourceSelection(i*int(source.size())/12,i*int(source.size())/12);
+            app.processEvents();
+        }
+        qInfo()<<"Load ms:"<<load<<"; average caret switch ms:"<<timer.elapsed()/12.0;
+        if(editor.markdown()!=source)return 31;
+        const auto selection=editor.sourceSelection();
+        QKeyEvent typing(QEvent::KeyPress,Qt::Key_X,Qt::NoModifier,"x");
+        timer.restart();QApplication::sendEvent(&editor,&typing);app.processEvents();
+        qInfo()<<"Typing ms:"<<timer.elapsed();
+        QString expected=source;expected.insert(selection.second,"x");
+        if(editor.markdown()!=expected)return 32;
+        return 0;
+    }
+    if(app.arguments().contains("--embedded-editor-test")){
+        QWidget host;
+        auto *layout=new QHBoxLayout(&host);
+        auto *first=new MarkdownEditorWidget(&host);
+        auto *second=new MarkdownEditorWidget(&host);
+        layout->addWidget(first);layout->addWidget(second);
+        first->setBaseUrl(QUrl::fromLocalFile(QDir::tempPath()+"/"));
+        first->setMarkdown("alpha\nbeta");second->setMarkdown("independent");
+        host.resize(900,500);host.show();app.processEvents();
+        int changes=0;
+        QObject::connect(first,&MarkdownEditorWidget::textChanged,&host,[&]{++changes;});
+        first->selectSource(0,5);first->formatSelection("**","**");
+        if(first->markdown()!="**alpha**\nbeta"||second->markdown()!="independent"||
+           !first->document()->isModified()||changes!=1)return 10;
+        first->setLiveMode(false);
+        if(first->selection()!=qMakePair(2,7)||first->isLiveMode()||!second->isLiveMode())return 11;
+        first->document()->undo();first->render();
+        if(first->markdown()!="alpha\nbeta")return 12;
+        first->setLiveMode(true);first->selectSource(0,5);
+        first->editingActions().first()->trigger();
+        if(first->markdown()!="**alpha**\nbeta")return 13;
+        for(auto *action:first->editingActions())
+            if(action->shortcutContext()!=Qt::WidgetWithChildrenShortcut)return 14;
+        if(first->liveModeAction()->shortcutContext()!=Qt::WidgetWithChildrenShortcut||
+           first->findChild<QMenuBar *>()||first->findChild<QToolBar *>())return 15;
+        first->applyBaseFontSize(19);
+        if(!first->document()->isModified())return 16;
+        first->setMarkdown("replacement");
+        if(first->document()->isModified()||first->markdown()!="replacement")return 17;
+        QWidget otherHost;
+        first->setParent(&otherHost);first->show();first->setFocus();app.processEvents();
+        if(first->parentWidget()!=&otherHost||first->markdown()!="replacement")return 18;
+        // Destroy an editor while its delayed render is still pending.
+        first->replaceSource(0,0,"x",1,1);delete first;app.processEvents();
+        return 0;
+    }
     if(app.arguments().contains("--code-background-test")){
         LiveEditor editor;editor.resize(640,480);
         editor.document()->setDocumentMargin(24);
@@ -236,6 +558,7 @@ $$$$
         }
         {
             Window settingsWindow;
+            settingsWindow.findChild<MarkdownEditorWidget *>()->setLiveMode(true);
             auto *source=settingsWindow.findChild<QPlainTextEdit *>("markdownEditor");
             auto *liveView=static_cast<LiveEditor *>(settingsWindow.findChild<QTextBrowser *>("markdownPreview"));
             source->setPlainText("# Heading\n\nBody");settingsWindow.selectSource(2,9);
@@ -253,6 +576,7 @@ $$$$
             dialog->close();QSettings().remove("appearance/baseFontSize");
         }
         Window live;
+        live.findChild<MarkdownEditorWidget *>()->setLiveMode(true);
         auto *edit=live.findChild<QPlainTextEdit *>("markdownEditor");
         auto *output=live.findChild<QTextBrowser *>("markdownPreview");
         auto *toggle=live.findChild<QAction *>("livePreviewAction");
@@ -500,7 +824,7 @@ $$$$
         live.show();
         auto *openButton=live.findChild<QPushButton *>("openDocumentButton");
         auto *toolbar=live.findChild<QToolBar *>();
-        images=checkLive(openButton->isVisible()&&!toolbar->isVisible()&&!output->isVisible(),__LINE__)&&images;
+        images=checkLive(openButton->isVisible()&&!toolbar&&!output->isVisible(),__LINE__)&&images;
         openButton->click();
         auto *fileDialog=live.findChild<QFileDialog *>();
         images=checkLive(fileDialog&&fileDialog->isVisible(),__LINE__)&&images;
@@ -511,7 +835,7 @@ $$$$
             settle();
             QMetaObject::invokeMethod(fileDialog,"accept",Qt::DirectConnection);
             settle();
-            images=checkLive(!openButton->isVisible()&&toolbar->isVisible()&&toolbar->actions().contains(toggle)&&
+            images=checkLive(!openButton->isVisible()&&!toolbar&&!toggle->associatedObjects().isEmpty()&&
                 output->isVisible()&&!edit->document()->isModified(),__LINE__)&&images;
             images=checkLive(edit->toPlainText()==QString::fromUtf8(contents)&&
                 liveOutput->markdown()==edit->toPlainText()&&
@@ -540,6 +864,7 @@ $$$$
             images=checkLive(written,__LINE__)&&images;
             if(written){
                 Window reopening;
+                reopening.findChild<MarkdownEditorWidget *>()->setLiveMode(true);
                 auto *preview=reopening.findChild<QTextBrowser *>("markdownPreview");
                 reopening.load(longFile.fileName());
                 reopening.show();

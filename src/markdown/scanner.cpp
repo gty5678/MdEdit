@@ -97,6 +97,38 @@ QList<Span> scanSpans(const QString &s){
     return spans;
 }
 
+// Return complete, single-line ==highlight== spans, excluding code/math.
+QList<QPair<int,int>> highlightRanges(const QString &source){
+    const auto protectedSpans=scanSpans(source);
+    const auto delimiter=[&](int at){
+        if(at<0||at+1>=source.size()||source[at]!='='||source[at+1]!='='||escaped(source,at)||
+           (at>0&&source[at-1]=='=')||(at+2<source.size()&&source[at+2]=='='))return false;
+        for(const auto &span:protectedSpans)
+            if(at<span.start+span.length&&at+2>span.start)return false;
+        return true;
+    };
+    QList<QPair<int,int>> result;
+    for(int start=0;start<source.size();){
+        int end=source.indexOf('\n',start);if(end<0)end=source.size();
+        const auto line=QStringView(source).mid(start,end-start);
+        if(!line.startsWith(u"    ")&&!line.startsWith(u"\t")){
+            int open=-1;
+            for(int at=start;at+1<end;++at){
+                if(!delimiter(at))continue;
+                if(open<0)open=at;
+                else{
+                    if(!QStringView(source).mid(open+2,at-open-2).trimmed().isEmpty())
+                        result.append({open,at+2});
+                    open=-1;
+                }
+                ++at;
+            }
+        }
+        start=end+1;
+    }
+    return result;
+}
+
 CodeBody codeBody(const QString &text,int fenceStart){
     if(fenceStart>=0&&text.mid(fenceStart,3)!="```"&&text.mid(fenceStart,3)!="~~~")fenceStart=-1;
     const auto spans=fenceStart>=0?QList<Span>{{fenceStart,int(text.size())-fenceStart,SpanKind::Code,true}}:scanSpans(text);

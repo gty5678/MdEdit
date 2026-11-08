@@ -1,8 +1,10 @@
+> 资源编辑器架构基础版本已接入：应用使用单视口 Live 编辑，可切换源码；不提供分屏模式。实现范围、模块边界和后续工作见 [基础版本说明](docs/resource-editor-foundation.md)。
+
 # MdEdit
 
 基于 Qt 6 / C++17 / CMake / Ninja 的单文档 Markdown 编辑器，使用 vcpkg 管理依赖，支持 Windows、macOS 和 Linux 构建。
 
-打开文件后，界面顶部提供“Live 编辑”切换按钮。默认在同一文档区域直接编辑：光标进入段落时显示该段 Markdown 源码，离开后恢复排版与公式。空行分隔编辑段，代码块和多行公式保持完整。Ctrl+E 可切换为全文源码编辑。
+“视图”菜单提供“Live 编辑 / 源码”切换功能。默认在同一文档区域直接编辑：光标进入段落时显示该段 Markdown 源码，离开后恢复排版与公式。空行分隔编辑段，代码块和多行公式保持完整。Ctrl+E 可切换为全文源码编辑。
 
 ## 使用
 
@@ -14,6 +16,10 @@ Windows 打包后运行 `dist/windows/bin/MdEdit.exe`。在启动页点击“打
 - Live 模式中，代码块在非编辑状态将围栏行留空，点击后显示完整源码；围栏行始终保留高度，切换时排版不跳动。支持 C/C++、Python、JavaScript/TypeScript、JSON、Shell 和 LaTeX 的基础语法高亮；未标注或未知语言以等宽字体显示。
 
 停止输入片刻后，修改会以 UTF-8 原子写回原文件。关闭窗口时会立即保存尚未写入的修改。也可通过命令行参数打开文件。支持 Markdown 标题、列表、表格、代码块和相对路径图片。
+
+Live 编辑中，输入 `*`、`**`、`***`、`~~` 或 `==` 后，后续文字立即显示斜体、加粗、加粗斜体、删除线或高亮，直到配对标记闭合或当前行结束；代码与转义标记不触发样式。
+
+正文支持 `==文字==` 浅黄色背景高亮，可与加粗、斜体和删除线组合；代码中的标记保持原样。
 
 ## 数学公式
 
@@ -125,7 +131,7 @@ ctest --preset macos-qt-debug
 
 ## 第三方依赖
 
-- Qt：vcpkg `qtbase`（Widgets、PNG/JPEG、各平台后端）和 `qtsvg`（SVG 图片）。
+- Qt：vcpkg `qtbase`（Widgets、PNG/JPEG、各平台后端）、`qtsvg`（SVG 图片）和 `qtimageformats`（WebP、TIFF）。图片仅支持 PNG、SVG、JPG、JPEG、BMP、GIF、WebP、TIF、TIFF；其他文件显示单行附件，可用系统默认程序打开。
 - tinyxml2：vcpkg 官方 port。
 - [MicroTeX](https://github.com/NanoMichael/MicroTeX)：项目的 `ports/microtex` overlay port，固定上游提交及 SHA512，构建 Qt 6 静态后端；通过补丁保留 Qt 6 字体 API 和资源路径修复，不编译示例。应用通过 `find_package(MicroTeX)` 使用安装后的库。
 
@@ -137,4 +143,17 @@ ctest --preset macos-qt-debug
 
 完整功能域、现有差异和待补项见 [Obsidian 行为对照](docs/obsidian-behavior-comparison.md)。新增“文件”和“编辑”菜单，支持打开、保存、加粗、斜体、行内代码、链接、段落复制/剪切、缩进、删除当前行及查找替换。快捷键中的 Ctrl 在 macOS 上对应 Cmd。当前查找为字面文本匹配，可区分大小写并循环查找；替换支持单次与全部，操作可撤销。菜单中的快捷键以实际平台显示为准。
 
-基础字号可在顶部“设置”按钮或“文件 → 设置”中调整（macOS 也可能显示在应用的设置菜单），快捷键 Ctrl/Cmd+,。支持 9–30 pt，默认 14 pt；即时更新正文、源码、界面和行号，标题按层级比例缩放。设置自动保存，重启后保留，并提供“恢复默认值”。
+基础字号可在“文件 → 设置”中调整（macOS 也可能显示在应用的设置菜单），快捷键 Ctrl/Cmd+,。支持 9–30 pt，默认 14 pt；即时更新正文、源码、界面和行号，标题按层级比例缩放。设置自动保存，重启后保留，并提供“恢复默认值”。
+
+编辑区已封装为可嵌入的 `MarkdownEditorWidget`（`QWidget`），可链接 `MdEdit::Editor` 复用。接口、资源初始化与示例见 [嵌入指南](docs/embedding.md)。
+
+## PDF 预览
+
+Live 模式支持独立段落的 `![说明](文件.pdf)`，含空格路径可写成 `![说明](<文件 路径.pdf>)`。
+PDF 在后台加载，显示单页预览，可通过下方“上一页 / 下一页”翻页或“打开原文件”调用系统阅读器。点击“编辑源码”编辑引用，移出后恢复预览；翻页不会修改 Markdown。仅支持本地文件（最多 32 MiB），加密或损坏文件显示错误提示。
+
+构建需额外安装与 Qt kit 匹配的 **Qt PDF** 模块（`Qt6::Pdf`），可通过 Qt Maintenance Tool 的 Extensions / Qt PDF 安装。vcpkg 使用 `qtwebengine` port 的 `pdf` feature，关闭默认 features，不启用 WebEngine 浏览器。打包时需部署 Qt PDF 运行库。Windows 建议使用官方 MSVC Qt kit；其他工具链需单独验证 PDF 模块支持。
+
+PDF 预览块内支持滚轮上下浏览：页面按宽度显示，滚到页尾／页首后继续滚动可切换页面，右侧显示页内滚动位置。鼠标移到块外则滚动正文。
+
+外部资源块（图片、PDF、CSV、文本及附件）作为整体展示，点击预览或将光标移入不会自动展开引用源码。使用块右上角“编辑源码”按钮修改引用；块内点击用于对应的预览或打开功能。

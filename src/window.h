@@ -1,14 +1,10 @@
 #pragma once
-#include "editor/live_editor.h"
+#include "editor/markdown_editor_widget.h"
 
 class Window : public QMainWindow {
-    QPlainTextEdit *editor=new NumberedEditor<QPlainTextEdit>;
-    LiveEditor *preview=new LiveEditor;
-    QStackedWidget *pages=new QStackedWidget;
+    MarkdownEditorWidget *editingSurface=new MarkdownEditorWidget;
     QStackedWidget *screens=new QStackedWidget;
-    QToolBar *bar;
-    QAction *previewAction;
-    QTimer timer,autosave,statsTimer;
+    QTimer autosave,statsTimer;
     QString path;
     QLabel *documentStats=new QLabel;
     int baseFontSize=14;

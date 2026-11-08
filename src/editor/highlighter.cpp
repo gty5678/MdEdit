@@ -1,4 +1,5 @@
 #include "highlighter.h"
+#include "../markdown/renderer.h"
 
 Highlighter::Highlighter(QTextDocument *d):QSyntaxHighlighter(static_cast<QObject *>(d)){
         connect(d,&QTextDocument::contentsChange,this,[this]{spansDirty=true;});
@@ -20,6 +21,15 @@ void Highlighter::highlightBlock(const QString &text) {
         }
         static const QList<QPair<QRegularExpression,QString>> rules={{QRegularExpression("^#{1,6} .*$"),"#623e9c"},{QRegularExpression("\\*\\*.+?\\*\\*"),"#825018"}};
         for(const auto &r:rules){auto matches=r.first.globalMatch(text);while(matches.hasNext()){auto m=matches.next();QTextCharFormat f;f.setForeground(QColor(r.second));setFormat(m.capturedStart(),m.capturedLength(),f);}}
+        for(const auto &range:highlightRanges(text)){
+            const int position=currentBlock().position()+range.first;
+            const bool protectedText=std::any_of(spans.cbegin(),spans.cend(),[&](const Span &span){
+                return position>=span.start&&position<span.start+span.length;
+            });
+            if(!protectedText)for(int at=range.first;at<range.second;++at){
+                auto characters=format(at);characters.setBackground(highlightBackground);setFormat(at,1,characters);
+            }
+        }
         const int start=currentBlock().position(),end=start+int(text.size());int state=0;
         auto first=std::lower_bound(spans.cbegin(),spans.cend(),start,
             [](const Span &span,int position){return span.start+span.length<=position;});

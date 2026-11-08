@@ -1,15 +1,80 @@
 #include "renderer.h"
 #include "scanner.h"
+#include "../platform.h"
 #include "latex.h"
 #include "core/formula.h"
 #include "platform/qt/graphic_qt.h"
 #include <memory>
+#include <QPicture>
+
+// Editing deliberately accepts unfinished delimiters, bounded by a source line.
+// Source positions and visible delimiters stay intact; only formats change.
+QList<InlineEditingStyle> inlineEditingStyles(const QString &source){
+    QList<InlineEditingStyle> styles;
+    struct Open { QString delimiter; int begin; QTextCharFormat format; };
+    QList<Open> open;
+    const auto finish=[&](int end){
+        for(const auto &entry:open)if(end>entry.begin)styles.append({entry.begin,end-entry.begin,entry.format});
+        open.clear();
+    };
+    const auto spans=scanSpans(source);
+    int protectedIndex=0;
+    for(int i=0;i<source.size();){
+        if(source[i]=='\n'){finish(i);++i;continue;}
+        while(protectedIndex<spans.size()&&spans[protectedIndex].start+spans[protectedIndex].length<=i)++protectedIndex;
+        if(protectedIndex<spans.size()&&spans[protectedIndex].start<=i){
+            const auto &span=spans[protectedIndex];
+            const int end=span.start+span.length;
+            if(span.kind==SpanKind::Code&&!span.fenced){
+                QTextCharFormat code;code.setFontFamilies({QString::fromLatin1(editorFont)});
+                styles.append({span.start,span.length,code});
+            }
+            // A protected multiline span also ends any unfinished line style.
+            if(QStringView(source).mid(i,end-i).contains('\n'))finish(i);
+            i=end;continue;
+        }
+        if(escaped(source,i)){++i;continue;}
+        const QChar ch=source[i];
+        if(ch!='*'&&ch!='_'&&ch!='~'&&ch!='='&&ch!='`'){++i;continue;}
+        int run=1;while(i+run<source.size()&&source[i+run]==ch)++run;
+        const bool emphasis=ch=='*'||ch=='_';
+        if((emphasis&&run>3)||((ch=='~'||ch=='=')&&run!=2)){i+=run;continue;}
+        if(ch=='_'&&i>0&&i+run<source.size()&&source[i-1].isLetterOrNumber()&&source[i+run].isLetterOrNumber()){
+            i+=run;continue;
+        }
+        const QString delimiter=source.mid(i,run);
+        int matching=-1;
+        for(int n=open.size()-1;n>=0;--n)if(open[n].delimiter==delimiter){matching=n;break;}
+        if(matching>=0){
+            const auto entry=open.takeAt(matching);
+            if(i>entry.begin)styles.append({entry.begin,i-entry.begin,entry.format});
+        }else if(i+run==source.size()||source[i+run]=='\n'||!source[i+run].isSpace()){
+            QTextCharFormat format;
+            if(emphasis){if(run>=2)format.setFontWeight(QFont::Bold);if(run!=2)format.setFontItalic(true);}
+            else if(ch=='~')format.setFontStrikeOut(true);
+            else if(ch=='=')format.setBackground(highlightBackground);
+            else format.setFontFamilies({QString::fromLatin1(editorFont)});
+            open.append({delimiter,i+run,format});
+            if(ch=='`'){
+                int end=source.indexOf('\n',i+run);if(end<0)end=source.size();
+                finish(end);i=end;continue;
+            }
+        }
+        i+=run;
+    }
+    finish(source.size());
+    return styles;
+}
 
 qreal bodyLineHeight(const QFont &font){
     return qCeil(QFontMetricsF(font).lineSpacing()*1.5);
 }
 
 void setBodyLineHeight(QTextBlockFormat &format,const QFont &font){
+    // Source blank lines already provide paragraph spacing in the live
+    // editor. Markdown's default paragraph margins would count it twice.
+    format.setTopMargin(0);
+    format.setBottomMargin(0);
     format.setLineHeight(bodyLineHeight(font),QTextBlockFormat::FixedHeight);
 }
 
@@ -34,6 +99,19 @@ public:
         if(format.hasProperty(formulaPaintAscent)){
             painted.moveTop(rect.bottom()-format.doubleProperty(formulaPaintAscent));
             painted.setHeight(format.doubleProperty(formulaPaintHeight));
+        }
+        if(format.hasProperty(formulaVector)){
+            const QPicture picture=format.property(formulaVector).value<QPicture>();
+            const QSizeF size=format.property(formulaVectorSize).toSizeF();
+            painter->save();
+            painter->translate(painted.topLeft());
+            // QPicture playback adjusts for device DPI; our geometry is
+            // already in the document's logical coordinates, so cancel it.
+            painter->scale(painted.width()/size.width()*picture.logicalDpiX()/painter->device()->logicalDpiX(),
+                           painted.height()/size.height()*picture.logicalDpiY()/painter->device()->logicalDpiY());
+            painter->drawPicture(QPointF(0,0),picture);
+            painter->restore();
+            return;
         }
         imageHandler->drawObject(painter,painted,document,pos,format);
     }
@@ -93,7 +171,31 @@ int renderMarkdown(QTextDocument *document,const QString &source,QStringList &er
     if(!live&&!dynamic_cast<FormulaImageHandler *>(layout->handlerForObject(QTextFormat::ImageObject)))
         new FormulaImageHandler(layout);
     QList<QPair<QString,QString>> math;
-    document->setMarkdown(preserveLineBreaks(protectMath(source,math)));
+    // Keep Markdown parsing inside marked text (bold, links, math, etc.).
+    // Unique delimiter placeholders survive Qt's parser without HTML injection.
+    QString marked=source;
+    QList<QPair<QString,QString>> markers;
+    const auto ranges=highlightRanges(source);
+    QString prefix="MDEDITMARK"+QUuid::createUuid().toString(QUuid::Id128);
+    for(int i=ranges.size()-1;i>=0;--i){
+        const QString begin=prefix+QString::number(i)+"BEGIN:";
+        const QString end=":"+prefix+QString::number(i)+"END";
+        marked.replace(ranges[i].second-2,2,end);
+        marked.replace(ranges[i].first,2,begin);
+        markers.append({begin,end});
+    }
+    document->setMarkdown(preserveLineBreaks(protectMath(marked,math)));
+    for(const auto &marker:markers){
+        auto begin=document->find(marker.first),end=document->find(marker.second);
+        if(begin.isNull()||end.isNull())continue;
+        const int start=begin.selectionStart();
+        const int length=end.selectionStart()-begin.selectionEnd();
+        end.removeSelectedText();begin.removeSelectedText();
+        QTextCursor highlight(document);highlight.setPosition(start);
+        highlight.setPosition(start+length,QTextCursor::KeepAnchor);
+        QTextCharFormat format;format.setBackground(highlightBackground);
+        highlight.mergeCharFormat(format);
+    }
     for(auto block=document->begin();block.isValid();block=block.next()){
         auto format=block.blockFormat();
         if(format.headingLevel()){
@@ -108,7 +210,10 @@ int renderMarkdown(QTextDocument *document,const QString &source,QStringList &er
                 heading.setCharFormat(characters);
             }
         }
-        if(format.intProperty(QTextFormat::BlockQuoteLevel)>0){
+        if(isCodeBlock(format)){
+            format.setBackground(codeBlockBackground);
+            QTextCursor(block).setBlockFormat(format);
+        }else if(format.intProperty(QTextFormat::BlockQuoteLevel)>0){
             format.setBackground(quoteBackground);
             QTextCursor(block).setBlockFormat(format);
         }
@@ -142,6 +247,16 @@ int renderMarkdown(QTextDocument *document,const QString &source,QStringList &er
                 (textMetrics.ascent()-lift)/ascent,(textMetrics.descent()+lift)/descent));
             const qreal imageWidth=width*scale;
             const qreal imageHeight=height*scale;
+            // Keep scalable glyph and rule commands in the fragment itself,
+            // so cached fragments preserve vectors when copied between documents.
+            QPicture picture;
+            {
+                QPainter vectorPainter(&picture);
+                vectorPainter.setRenderHints(QPainter::Antialiasing|QPainter::TextAntialiasing);
+                vectorPainter.scale(scale,scale);
+                tex::Graphics2D_qt graphics(&vectorPainter);
+                formula->draw(graphics,padding,padding);
+            }
             QImage image(QSize(qCeil(imageWidth*2),qCeil(imageHeight*2)),QImage::Format_ARGB32_Premultiplied);image.fill(Qt::transparent);
             QPainter painter(&image);
             painter.scale(image.width()/imageWidth,image.height()/imageHeight);
@@ -150,6 +265,9 @@ int renderMarkdown(QTextDocument *document,const QString &source,QStringList &er
             tex::Graphics2D_qt graphics(&painter);formula->draw(graphics,padding,padding);painter.end();
             const QUrl url("math:/"+QUuid::createUuid().toString(QUuid::WithoutBraces));document->addResource(QTextDocument::ImageResource,url,image);
             QTextImageFormat format;format.setName(url.toString());format.setWidth(imageWidth);format.setHeight(imageHeight);format.setVerticalAlignment(QTextCharFormat::AlignBaseline);
+            format.setProperty(formulaMarkdown,entry.second);
+            format.setProperty(formulaVector,QVariant::fromValue(picture));
+            format.setProperty(formulaVectorSize,QSizeF(imageWidth,imageHeight));
             if(!block){
                 const qreal imageAscent=ascent*scale+lift;
                 format.setHeight(imageAscent);

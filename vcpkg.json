@@ -33,6 +33,8 @@
       "platform": "windows"
     },
     "qtsvg",
+    {"name": "qtimageformats", "default-features": false, "features": ["tiff", "webp"]},
+    {"name": "qtwebengine", "default-features": false, "features": ["pdf"]},
     "tinyxml2"
   ]
 }

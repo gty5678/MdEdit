@@ -2,20 +2,29 @@ cmake_minimum_required(VERSION 3.24)
 project(MdEdit VERSION 1.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-find_package(Qt6 6.12.0 CONFIG REQUIRED COMPONENTS Widgets Svg)
+find_package(Qt6 6.12.0 CONFIG REQUIRED COMPONENTS Widgets Svg Pdf)
 find_package(MicroTeX CONFIG REQUIRED)
 qt_standard_project_setup()
-qt_add_executable(MdEdit WIN32 MACOSX_BUNDLE
-  src/main.cpp
-  src/window.h src/window.cpp
+add_library(MdEditEditor STATIC
   src/platform.h
   src/markdown/scanner.h src/markdown/scanner.cpp
   src/markdown/renderer.h src/markdown/renderer.cpp
   src/editor/highlighter.h src/editor/highlighter.cpp
   src/editor/numbered_editor.h
+  src/editor/tables/table_data.h src/editor/tables/table_data.cpp
+  src/editor/tables/table_editor_dialog.h src/editor/tables/table_editor_dialog.cpp
   src/editor/live_editor.h src/editor/live_editor.cpp
-  tests/app_tests.h tests/app_tests.cpp)
-target_include_directories(MdEdit PRIVATE src)
+  src/editor/markdown_editor_widget.h src/editor/markdown_editor_widget.cpp
+  src/editor/markdown/block_parser.h src/editor/markdown/block_parser.cpp
+  src/editor/render/renderer_registry.h src/editor/render/renderer_registry.cpp
+  src/editor/resources/resource_manager.h src/editor/resources/resource_manager.cpp
+  src/editor/view/markdown_preview_widget.h src/editor/view/markdown_preview_widget.cpp)
+add_library(MdEdit::Editor ALIAS MdEditEditor)
+target_include_directories(MdEditEditor PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(MdEditEditor PUBLIC Qt6::Widgets Qt6::Svg Qt6::Pdf MicroTeX::MicroTeX)
+qt_add_executable(MdEdit WIN32 MACOSX_BUNDLE
+  src/main.cpp src/window.h src/window.cpp
+  tests/app_tests.h tests/app_tests.cpp tests/table_edit_tests.cpp tests/pdf_tests.cpp)
 if(APPLE)
   set_target_properties(MdEdit PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER "io.mdedit.app"
@@ -26,9 +35,10 @@ if(APPLE)
 else()
   set(MDEDIT_RESOURCE_DIR "$<TARGET_FILE_DIR:MdEdit>")
 endif()
-target_link_libraries(MdEdit PRIVATE Qt6::Widgets Qt6::Svg MicroTeX::MicroTeX)
+target_link_libraries(MdEdit PRIVATE MdEdit::Editor)
 if(MSVC)
   target_compile_options(MdEdit PRIVATE /utf-8 /W4)
+  target_compile_options(MdEditEditor PRIVATE /utf-8 /W4)
 endif()
 if(WIN32)
   # vcpkg keeps Qt plugins outside the executable directory in the build tree.
@@ -91,15 +101,35 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  qt_add_executable(MdEditArchitectureTests tests/architecture_tests.cpp)
+  target_link_libraries(MdEditArchitectureTests PRIVATE MdEdit::Editor)
+  add_test(NAME architecture COMMAND MdEditArchitectureTests)
+  set_tests_properties(architecture PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_test(NAME table-edit COMMAND MdEdit --table-edit-test)
+  set_tests_properties(table-edit PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_test(NAME live-pdf COMMAND MdEdit --live-pdf-test)
+  set_tests_properties(live-pdf PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_test(NAME live-csv COMMAND MdEdit --live-csv-test)
+  set_tests_properties(live-csv PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_test(NAME typing-style COMMAND MdEdit --typing-style-test)
+  set_tests_properties(typing-style PROPERTIES TIMEOUT 30)
+  add_test(NAME highlight COMMAND MdEdit --highlight-test)
+  set_tests_properties(highlight PROPERTIES TIMEOUT 30)
+  add_test(NAME line-spacing COMMAND MdEdit --line-spacing-test)
+  set_tests_properties(line-spacing PROPERTIES TIMEOUT 30)
+  add_test(NAME formula-vector COMMAND MdEdit --formula-vector-test)
+  set_tests_properties(formula-vector PROPERTIES TIMEOUT 30)
+  add_test(NAME embedded-editor COMMAND MdEdit --embedded-editor-test)
+  set_tests_properties(embedded-editor PROPERTIES TIMEOUT 30)
   add_test(NAME markdown-math-smoke COMMAND MdEdit --smoke-test "${CMAKE_CURRENT_SOURCE_DIR}/综合测试.md")
   set_tests_properties(markdown-math-smoke PROPERTIES TIMEOUT 60)
   if(WIN32)
-    set_tests_properties(markdown-math-smoke PROPERTIES
+    set_tests_properties(markdown-math-smoke embedded-editor formula-vector line-spacing highlight typing-style PROPERTIES
       ENVIRONMENT "QT_QPA_PLATFORM=windows"
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
   elseif(APPLE)
-    set_tests_properties(markdown-math-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=cocoa")
+    set_tests_properties(markdown-math-smoke embedded-editor formula-vector line-spacing highlight typing-style PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=cocoa")
   else()
-    set_tests_properties(markdown-math-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    set_tests_properties(markdown-math-smoke embedded-editor formula-vector line-spacing highlight typing-style PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   endif()
 endif()

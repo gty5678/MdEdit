@@ -11,5 +11,6 @@ struct CodeBody {
 
 bool escaped(const QString &s,int pos);
 QList<Span> scanSpans(const QString &s);
+QList<QPair<int,int>> highlightRanges(const QString &source);
 CodeBody codeBody(const QString &text,int fenceStart=-1);
 void colorCode(const QString &text,QString language,const std::function<void(int,int,const QColor &)> &apply);
