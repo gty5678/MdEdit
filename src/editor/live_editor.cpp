@@ -157,7 +157,7 @@ LiveEditor::LiveEditor(){
         });
     }
 
-void LiveEditor::setSource(const QString &text){if(text==source&&!regions.isEmpty())return;cancelAxisDrag();axisSource=axisIndex=-1;resourceSourceEditStart=-1;source=text;rebuild(-1,0);}
+void LiveEditor::setSource(const QString &text){if(text==source&&!regions.isEmpty())return;cancelAxisDrag();cellRangeTable.clear();cellRangePressed=cellRangeDragging=false;axisSource=axisIndex=-1;resourceSourceEditStart=-1;source=text;rebuild(-1,0);}
 
 QString LiveEditor::markdown()const{return source;}
 
@@ -703,15 +703,42 @@ bool LiveEditor::formatNativeSelection(const QString &left,const QString &right)
     else return false;
     cursor.mergeCharFormat(format);mergeCurrentCharFormat(format);return true;
 }
+bool LiveEditor::editSelectedCells(bool copy,bool clear){
+    if(!cellRangeTable||!cellRangeDragging)return false;
+    const auto node=tableNodeAt(source,cellRangeSource);if(!node||node->resource)return false;
+    auto data=mdedit::readMarkdownTable(source.mid(node->source.begin,node->source.end-node->source.begin));
+    const int top=qMin(cellAnchorRow,cellEndRow),bottom=qMax(cellAnchorRow,cellEndRow);
+    const int left=qMin(cellAnchorColumn,cellEndColumn),right=qMax(cellAnchorColumn,cellEndColumn);
+    if(!data.error.isEmpty()||bottom>=data.rows.size())return false;
+    QStringList lines;
+    for(int r=top;r<=bottom;++r){
+        if(right>=data.rows[r].size())return false;
+        lines.append(data.rows[r].mid(left,right-left+1).join('\t'));
+        if(clear)for(int c=left;c<=right;++c)data.rows[r][c].clear();
+    }
+    if(copy)QApplication::clipboard()->setText(lines.join('\n'));
+    if(clear){
+        const int scroll=verticalScrollBar()->value();
+        source.replace(node->source.begin,node->source.end-node->source.begin,mdedit::writeMarkdownTable(data));
+        cellRangeTable.clear();cellRangeDragging=false;
+        rebuild(-1,0);verticalScrollBar()->setValue(scroll);if(sourceChanged)sourceChanged(source);
+    }
+    return true;
+}
 bool LiveEditor::clipboardNativeCell(bool cut){
+    if(cellRangeTable&&cellRangeDragging)return editSelectedCells(true,cut);
     if(axisSource>=0&&axisIndex>=0){
         const auto node=tableNodeAt(source,axisSource);if(!node||node->resource)return false;
         const auto data=mdedit::readMarkdownTable(source.mid(node->source.begin,node->source.end-node->source.begin));
         if(!data.error.isEmpty())return false;QStringList lines;
-        if(axisRow){if(axisIndex>=data.rows.size())return false;lines.append(data.rows[axisIndex].join('\t'));}
-        else for(const auto &row:data.rows)lines.append(row.value(axisIndex));
+        const int first=qMin(axisIndex,axisLast),last=qMax(axisIndex,axisLast);
+        if(first<0)return false;
+        if(axisRow){
+            if(last>=data.rows.size())return false;
+            for(int i=first;i<=last;++i)lines.append(data.rows[i].join('\t'));
+        }else for(const auto &row:data.rows)lines.append(row.mid(first,last-first+1).join('\t'));
         QApplication::clipboard()->setText(lines.join('\n'));
-        if(cut){changeMarkdownTableAt(axisSource,axisRow?axisIndex:0,axisRow?0:axisIndex,axisRow?"removeRow":"removeColumn");axisSource=axisIndex=-1;}
+        if(cut)removeSelectedAxes();
         return true;
     }
     if(!textCursor().currentTable()||!bindNativeTable(textCursor())||!nativeSelection())return false;
@@ -788,7 +815,11 @@ void LiveEditor::layoutNativeTable(QTextTable *table){
     QList<qreal> preferred(table->columns(),80);
     const auto tableFormat=table->format();
     for(int row=0;row<table->rows();++row)for(int column=0;column<table->columns();++column){
-        const auto cell=table->cellAt(row,column);
+        auto cell=table->cellAt(row,column);
+        auto cellFormat=cell.format().toTableCellFormat();
+        cellFormat.setVerticalAlignment(QTextCharFormat::AlignMiddle);
+        cellFormat.setTopPadding(4);cellFormat.setBottomPadding(4);
+        if(cellFormat!=cell.format())cell.setFormat(cellFormat);
         auto cursor=cell.firstCursorPosition();cursor.setPosition(cell.lastPosition(),QTextCursor::KeepAnchor);
         QTextDocument measure;measure.setDefaultFont(font());measure.setDocumentMargin(0);
         auto option=measure.defaultTextOption();option.setWrapMode(QTextOption::NoWrap);measure.setDefaultTextOption(option);
@@ -805,6 +836,9 @@ void LiveEditor::layoutNativeTable(QTextTable *table){
         preferred[column]=qMax(preferred[column],qCeil(measure.idealWidth())+2*tableFormat.cellPadding()+2*qMax(1.0,tableFormat.border())+2);
         for(auto block=cell.firstCursorPosition().block();block.isValid()&&block.position()<=cell.lastPosition();block=block.next()){
             auto format=block.blockFormat();format.setAlignment(Qt::AlignLeft);format.setNonBreakableLines(false);
+            // Symmetric cell padding provides breathing room around natural text lines.
+            format.setTopMargin(0);format.setBottomMargin(0);
+            format.setLineHeight(0,QTextBlockFormat::SingleHeight);
             if(format!=block.blockFormat())QTextCursor(block).setBlockFormat(format);
         }
     }
@@ -927,9 +961,37 @@ void LiveEditor::contextMenuEvent(QContextMenuEvent *event){
             };
             operation("在上方插入行","insertRowBefore");operation("在下方插入行","insertRowAfter");
             operation("在左侧插入列","insertColumnBefore");operation("在右侧插入列","insertColumnAfter");menu->addSeparator();
-            operation("当前行上移","moveRowUp",row>0);operation("当前行下移","moveRowDown",row+1<rows);
-            operation("当前列左移","moveColumnLeft",column>0);operation("当前列右移","moveColumnRight",column+1<columns);menu->addSeparator();
-            operation("删除当前行","removeRow",rows>1);operation("删除当前列","removeColumn",columns>1);menu->addSeparator();
+            if(cellRangeDragging&&cellRangeTable==table){
+                auto selectedOperation=[&](const QString &label,const QString &name,bool rowAxis,int direction){
+                    const int first=rowAxis?qMin(cellAnchorRow,cellEndRow):qMin(cellAnchorColumn,cellEndColumn);
+                    const int last=rowAxis?qMax(cellAnchorRow,cellEndRow):qMax(cellAnchorColumn,cellEndColumn);
+                    const int total=rowAxis?rows:columns;
+                    auto *action=menu->addAction(label,this,[this,offset,first,last,rowAxis,direction]{
+                        axisSource=offset;axisRow=rowAxis;axisIndex=first;axisLast=last;
+                        cellRangeTable.clear();cellRangeDragging=cellRangePressed=false;
+                        if(direction==0)removeSelectedAxes();
+                        else{
+                            const int boundary=direction<0?first-1:last+2;
+                            if(reorderMarkdownAxisAt(offset,rowAxis,first,boundary,last-first+1)){
+                                axisIndex=first+direction;axisLast=last+direction;
+                            }
+                        }
+                        viewport()->update();
+                    });
+                    action->setObjectName(name);
+                    action->setEnabled(direction==0||(direction<0?first>0:last+1<total));
+                };
+                selectedOperation("所选行上移","moveSelectedRowsUp",true,-1);
+                selectedOperation("所选行下移","moveSelectedRowsDown",true,1);
+                selectedOperation("所选列左移","moveSelectedColumnsLeft",false,-1);
+                selectedOperation("所选列右移","moveSelectedColumnsRight",false,1);menu->addSeparator();
+                selectedOperation("删除所选行","removeSelectedRows",true,0);
+                selectedOperation("删除所选列","removeSelectedColumns",false,0);menu->addSeparator();
+            }else{
+                operation("当前行上移","moveRowUp",row>0);operation("当前行下移","moveRowDown",row+1<rows);
+                operation("当前列左移","moveColumnLeft",column>0);operation("当前列右移","moveColumnRight",column+1<columns);menu->addSeparator();
+                operation("删除当前行","removeRow",rows>1);operation("删除当前列","removeColumn",columns>1);menu->addSeparator();
+            }
         }
         menu->addAction("表格块上移",this,[this,offset]{moveTableBlockAt(offset,-1);});
         menu->addAction("表格块下移",this,[this,offset]{moveTableBlockAt(offset,1);});menu->popup(event->globalPos());event->accept();return;
@@ -991,15 +1053,40 @@ void LiveEditor::updateAxisDrop(){
         return;
     }
 }
+bool LiveEditor::removeSelectedAxes(){
+    const auto node=tableNodeAt(source,axisSource);if(!node||node->resource)return false;
+    auto data=mdedit::readMarkdownTable(source.mid(node->source.begin,node->source.end-node->source.begin));
+    if(!data.error.isEmpty())return false;
+    const int first=qMin(axisIndex,axisLast),last=qMax(axisIndex,axisLast);
+    const int total=axisRow?data.rows.size():data.rows.first().size();
+    if(first<0||last>=total)return false;
+    if(axisRow)for(int i=last;i>=first;--i)data.rows.removeAt(i);
+    else{
+        for(auto &cells:data.rows)for(int i=last;i>=first;--i)cells.removeAt(i);
+        for(int i=last;i>=first;--i)if(i<data.separators.size())data.separators.removeAt(i);
+    }
+    const QString replacement=last-first+1==total?QString():mdedit::writeMarkdownTable(data);
+    const int scroll=verticalScrollBar()->value();
+    source.replace(node->source.begin,node->source.end-node->source.begin,replacement);
+    axisSource=axisIndex=axisLast=-1;
+    rebuild(-1,0);verticalScrollBar()->setValue(scroll);if(sourceChanged)sourceChanged(source);return true;
+}
 void LiveEditor::cancelAxisDrag(){axisPressed=axisStarted=false;axisBoundary=-1;axisDragScroll.stop();viewport()->unsetCursor();viewport()->update();}
-bool LiveEditor::reorderMarkdownAxisAt(int offset,bool row,int from,int boundary){
+bool LiveEditor::reorderMarkdownAxisAt(int offset,bool row,int from,int boundary,int selectedCount){
     const auto node=tableNodeAt(source,offset);if(!node||node->resource)return false;
     auto data=mdedit::readMarkdownTable(source.mid(node->source.begin,node->source.end-node->source.begin));if(!data.error.isEmpty())return false;
     int columns=1;for(const auto &cells:data.rows)columns=qMax(columns,int(cells.size()));const int count=row?data.rows.size():columns;
-    if(from<0||from>=count||boundary<0||boundary>count||boundary==from||boundary==from+1)return false;
-    const int to=boundary>from?boundary-1:boundary;
-    if(row)data.rows.move(from,to);
-    else{for(auto &cells:data.rows){while(cells.size()<columns)cells.append(QString());cells.move(from,to);}while(data.separators.size()<columns)data.separators.append("---");data.separators.move(from,to);}
+    if(from<0||selectedCount<1||from+selectedCount>count||boundary<0||boundary>count||
+        (boundary>=from&&boundary<=from+selectedCount))return false;
+    const int to=boundary>from?boundary-selectedCount:boundary;
+    auto moveRange=[&](auto &items){
+        const auto selected=items.mid(from,selectedCount);
+        items.remove(from,selectedCount);
+        for(int i=0;i<selectedCount;++i)items.insert(to+i,selected[i]);
+    };
+    if(row)moveRange(data.rows);
+    else{for(auto &cells:data.rows){while(cells.size()<columns)cells.append(QString());moveRange(cells);}
+        while(data.separators.size()<columns)data.separators.append("---");moveRange(data.separators);}
     const int scroll=verticalScrollBar()->value();source.replace(node->source.begin,node->source.end-node->source.begin,mdedit::writeMarkdownTable(data));
     rebuild(-1,0);verticalScrollBar()->setValue(scroll);if(sourceChanged)sourceChanged(source);return true;
 }
@@ -1067,6 +1154,21 @@ QList<LiveEditor::CodeCopyControl> LiveEditor::codeCopyControls() const{
 
 void LiveEditor::mouseMoveEvent(QMouseEvent *event){
         tableHoverPoint=event->position().toPoint();viewport()->update();
+        if(cellRangePressed&&cellRangeTable&&(event->buttons()&Qt::LeftButton)){
+            if(!cellRangeDragging&&(tableHoverPoint-cellRangeOrigin).manhattanLength()>=QApplication::startDragDistance()){
+                cellRangeDragging=true;pressedLink.clear();
+                QScopedValueRollback<bool> guard(movingCursor,true);
+                if(nativeTable)revealNativeCell(QTextCursor(document()));
+                setTextCursor(cellRangeTable->cellAt(cellAnchorRow,cellAnchorColumn).firstCursorPosition());
+            }
+            if(cellRangeDragging)for(const auto &item:axisControls())if(item.table==cellRangeTable){
+                cellEndRow=item.rows.size()-1;cellEndColumn=item.columns.size()-1;
+                for(int r=0;r<item.rows.size();++r)if(tableHoverPoint.y()<=item.rows[r].bottom()){cellEndRow=r;break;}
+                for(int c=0;c<item.columns.size();++c)if(tableHoverPoint.x()<=item.columns[c].right()){cellEndColumn=c;break;}
+                viewport()->setCursor(Qt::CrossCursor);break;
+            }
+            event->accept();return;
+        }
         for(const auto &item:codeCopyControls())if(item.rect.contains(tableHoverPoint)){
             viewport()->setCursor(Qt::PointingHandCursor);viewport()->setToolTip("复制代码");return;
         }
@@ -1082,8 +1184,8 @@ void LiveEditor::mouseMoveEvent(QMouseEvent *event){
         }
         for(const auto &item:axisControls()){
             if(item.addRow.contains(tableHoverPoint)||item.addColumn.contains(tableHoverPoint)){viewport()->setCursor(Qt::PointingHandCursor);viewport()->setToolTip(item.addRow.contains(tableHoverPoint)?"追加一行":"追加一列");return;}
-            for(const auto &rect:item.rows)if(QRectF(item.frame.left()-22,rect.top()-2,23,rect.height()+4).contains(tableHoverPoint)){viewport()->setCursor(Qt::OpenHandCursor);viewport()->setToolTip("选择并拖动这一行");return;}
-            for(const auto &rect:item.columns)if(QRectF(rect.left()-2,item.frame.top()-22,rect.width()+4,23).contains(tableHoverPoint)){viewport()->setCursor(Qt::OpenHandCursor);viewport()->setToolTip("选择并拖动这一列");return;}
+            for(const auto &rect:item.rows)if(QRectF(item.frame.left()-22,rect.top()-2,23,rect.height()+4).contains(tableHoverPoint)){viewport()->setCursor(Qt::OpenHandCursor);viewport()->setToolTip("点击选择行，Shift 点击扩选，拖动调整顺序");return;}
+            for(const auto &rect:item.columns)if(QRectF(rect.left()-2,item.frame.top()-22,rect.width()+4,23).contains(tableHoverPoint)){viewport()->setCursor(Qt::OpenHandCursor);viewport()->setToolTip("点击选择列，Shift 点击扩选，拖动调整顺序");return;}
         }
         viewport()->setToolTip({});
         QTextBrowser::mouseMoveEvent(event);
@@ -1094,6 +1196,13 @@ void LiveEditor::mouseMoveEvent(QMouseEvent *event){
     }
 
 void LiveEditor::mousePressEvent(QMouseEvent *event){
+        // A grip projects the current cell rectangle onto its row/column axis.
+        const QPointer<QTextTable> selectedTable=cellRangeDragging?cellRangeTable:nullptr;
+        const int selectedTop=qMin(cellAnchorRow,cellEndRow),selectedBottom=qMax(cellAnchorRow,cellEndRow);
+        const int selectedLeft=qMin(cellAnchorColumn,cellEndColumn),selectedRight=qMax(cellAnchorColumn,cellEndColumn);
+        if(event->button()==Qt::LeftButton){
+            cellRangeTable.clear();cellRangePressed=cellRangeDragging=false;viewport()->update();
+        }
         if(event->button()==Qt::LeftButton&&event->modifiers()==Qt::NoModifier){
             for(const auto &item:codeCopyControls())if(item.rect.contains(event->position())){
                 const auto &region=regions[item.region];
@@ -1115,7 +1224,7 @@ void LiveEditor::mousePressEvent(QMouseEvent *event){
                 }
             }
         }
-        if(event->button()==Qt::LeftButton&&event->modifiers()==Qt::NoModifier){
+        if(event->button()==Qt::LeftButton&&!(event->modifiers()&~Qt::ShiftModifier)){
             const QPoint point=event->position().toPoint();
             for(const auto &item:axisControls()){
                 if(item.addRow.contains(point)||item.addColumn.contains(point)){
@@ -1125,11 +1234,23 @@ void LiveEditor::mousePressEvent(QMouseEvent *event){
                 for(int axis=0;axis<2;++axis){const auto &rects=axis==0?item.rows:item.columns;
                     for(int i=0;i<rects.size();++i){const QRectF handle=axis==0?QRectF(item.frame.left()-22,rects[i].top()-2,23,rects[i].height()+4):QRectF(rects[i].left()-2,item.frame.top()-22,rects[i].width()+4,23);
                         if(!handle.contains(point))continue;
-                        axisSource=item.start;axisIndex=i;axisRow=axis==0;axisPressed=true;axisStarted=false;axisSnapshot=source;axisOrigin=axisPoint=point;
-                        const auto first=item.table->cellAt(axisRow?i:0,axisRow?0:i),last=item.table->cellAt(axisRow?i:item.table->rows()-1,axisRow?item.table->columns()-1:i);
-                        auto selection=first.firstCursorPosition();bindNativeTable(selection);selection.setPosition(last.lastPosition(),QTextCursor::KeepAnchor);
+                        const int first=axis==0?selectedTop:selectedLeft,last=axis==0?selectedBottom:selectedRight;
+                        if(selectedTable==item.table&&i>=first&&i<=last){
+                            axisSource=item.start;axisRow=axis==0;axisIndex=first;axisLast=last;
+                        }
+                        const bool same=axisSource==item.start&&axisRow==(axis==0)&&axisIndex>=0;
+                        const bool extend=same&&(event->modifiers()&Qt::ShiftModifier);
+                        const bool retain=same&&i>=qMin(axisIndex,axisLast)&&i<=qMax(axisIndex,axisLast);
+                        if(!extend&&!retain)axisIndex=axisLast=i;
+                        if(extend)axisLast=i;
+                        axisSource=item.start;axisRow=axis==0;axisPressed=true;axisStarted=false;
+                        axisSnapshot=source;axisOrigin=axisPoint=point;
                         const int sy=verticalScrollBar()->value(),sx=horizontalScrollBar()->value();
-                        {QScopedValueRollback<bool> guard(movingCursor,true);setTextCursor(selection);}
+                        // Axis selection is structural. Restore any cell source
+                        // and keep the text cursor collapsed to avoid text highlighting.
+                        {QScopedValueRollback<bool> guard(movingCursor,true);
+                            if(nativeTable)revealNativeCell(QTextCursor(document()));
+                            setTextCursor(item.table->cellAt(axisRow?i:0,axisRow?0:i).firstCursorPosition());}
                         verticalScrollBar()->setValue(sy);horizontalScrollBar()->setValue(sx);
                         viewport()->update();event->accept();return;
                     }
@@ -1142,6 +1263,19 @@ void LiveEditor::mousePressEvent(QMouseEvent *event){
         int formulaRegion=-1;
         if(event->button()==Qt::LeftButton&&event->modifiers()==Qt::NoModifier){
             const auto point=event->position().toPoint();
+            // Track a possible grid drag even when the press hits a link;
+            // an unmoved click retains the normal link action.
+            const auto hitCursor=cursorForPosition(point);
+            if(auto *table=hitCursor.currentTable()){
+                const int index=regionAt(table->firstPosition());
+                const auto node=index>=0?tableNodeAt(source,regions[index].sourceStart):std::nullopt;
+                if(node&&!node->resource){
+                    const auto cell=table->cellAt(hitCursor);
+                    cellRangeTable=table;cellRangeSource=node->source.begin;
+                    cellAnchorRow=cellEndRow=cell.row();cellAnchorColumn=cellEndColumn=cell.column();
+                    cellRangePressed=true;cellRangeOrigin=point;
+                }
+            }
             const QString anchor=clickableAnchorAt(point);
             if(!anchor.isEmpty()){
                 pressedLink=anchor;
@@ -1155,6 +1289,10 @@ void LiveEditor::mousePressEvent(QMouseEvent *event){
             const int hit=cursorForPosition(point).position();
             const auto nativeCursor=cursorForPosition(point);
             if(nativeCursor.currentTable()&&bindNativeTable(nativeCursor)){
+                const auto cell=nativeTable->cellAt(nativeCursor);
+                cellRangeTable=nativeTable;cellRangeSource=nativeStart;
+                cellAnchorRow=cellEndRow=cell.row();cellAnchorColumn=cellEndColumn=cell.column();
+                cellRangePressed=true;cellRangeOrigin=point;
                 QScopedValueRollback<bool> guard(movingCursor,true);QTextBrowser::mousePressEvent(event);return;
             }
             const auto block=document()->findBlock(hit);
@@ -1191,11 +1329,15 @@ void LiveEditor::mousePressEvent(QMouseEvent *event){
     }
 
 void LiveEditor::mouseReleaseEvent(QMouseEvent *event){
+        if(event->button()==Qt::LeftButton&&cellRangePressed){
+            cellRangePressed=false;
+            if(cellRangeDragging){viewport()->unsetCursor();viewport()->update();event->accept();return;}
+        }
         if(event->button()==Qt::LeftButton&&axisPressed){
-            const int offset=axisSource,from=axisIndex,boundary=axisBoundary;const bool row=axisRow;
+            const int offset=axisSource,from=qMin(axisIndex,axisLast),count=qAbs(axisLast-axisIndex)+1,boundary=axisBoundary;const bool row=axisRow;
             bool inside=false;for(const auto &item:axisControls())if(item.start==axisSource)inside=item.frame.adjusted(-25,-25,25,25).contains(event->position());
             const bool apply=axisStarted&&source==axisSnapshot&&inside&&viewport()->rect().contains(event->position().toPoint());
-            cancelAxisDrag();if(apply){reorderMarkdownAxisAt(offset,row,from,boundary);axisIndex=boundary>from?boundary-1:boundary;}event->accept();return;
+            cancelAxisDrag();if(apply){if(reorderMarkdownAxisAt(offset,row,from,boundary,count)){axisIndex=boundary>from?boundary-count:boundary;axisLast=axisIndex+count-1;}}event->accept();return;
         }
         if(event->button()==Qt::LeftButton&&!pressedLink.isEmpty()){
             const QString anchor=pressedLink;
@@ -1218,6 +1360,7 @@ void LiveEditor::focusInEvent(QFocusEvent *event){
 
 void LiveEditor::focusOutEvent(QFocusEvent *event){
         if(axisPressed)cancelAxisDrag();
+        cellRangePressed=false;
         QTextBrowser::focusOutEvent(event);
         // Menus and dialogs take focus before their actions read the selection.
         // Rebuilding here discards it and moves the cursor to the document end.
@@ -1225,9 +1368,27 @@ void LiveEditor::focusOutEvent(QFocusEvent *event){
     }
 
 void LiveEditor::keyPressEvent(QKeyEvent *event){
+        if(cellRangeTable&&cellRangeDragging){
+            if(event->matches(QKeySequence::Copy)||event->matches(QKeySequence::Cut)){
+                editSelectedCells(true,event->matches(QKeySequence::Cut));event->accept();return;
+            }
+            if(event->key()==Qt::Key_Delete||event->key()==Qt::Key_Backspace){
+                editSelectedCells(false,true);event->accept();return;
+            }
+            if(event->key()==Qt::Key_Shift||event->key()==Qt::Key_Control||event->key()==Qt::Key_Meta||event->key()==Qt::Key_Alt){event->accept();return;}
+            cellRangeTable.clear();cellRangeDragging=false;viewport()->update();
+            if(event->key()==Qt::Key_Escape){event->accept();return;}
+        }
         if(axisPressed&&event->key()==Qt::Key_Escape){cancelAxisDrag();event->accept();return;}
         if(axisSource>=0&&axisIndex>=0&&!axisPressed&&(event->key()==Qt::Key_Delete||event->key()==Qt::Key_Backspace)){
-            changeMarkdownTableAt(axisSource,axisRow?axisIndex:0,axisRow?0:axisIndex,axisRow?"removeRow":"removeColumn");axisSource=axisIndex=-1;event->accept();return;
+            removeSelectedAxes();event->accept();return;
+        }
+        if(axisSource>=0&&axisIndex>=0&&!axisPressed){
+            if(event->matches(QKeySequence::Copy)||event->matches(QKeySequence::Cut)){
+                clipboardNativeCell(event->matches(QKeySequence::Cut));event->accept();return;
+            }
+            axisSource=axisIndex=axisLast=-1;viewport()->update();
+            if(event->key()==Qt::Key_Escape){event->accept();return;}
         }
         // A selected native table is a structural selection, not a cell edit.
         if(textCursor().hasSelection()&&
@@ -1250,6 +1411,9 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
                 event->accept();return;
             }
         }
+        // Qt can tag native arrow keys with KeypadModifier (including macOS
+        // arrows). It identifies the key, not an extra navigation command.
+        const auto navigationModifiers=event->modifiers()&~Qt::KeypadModifier;
         QScopedValueRollback<bool> verticalNavigation(movingVertically,event->key()==Qt::Key_Up||event->key()==Qt::Key_Down);
         if(textCursor().currentTable()&&bindNativeTable(textCursor())&&nativeSelection()){
             if(event->matches(QKeySequence::Undo)||event->matches(QKeySequence::Redo)){
@@ -1258,7 +1422,7 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
             const auto cell=nativeTable->cellAt(textCursor());
             const bool leaveAbove=event->key()==Qt::Key_Up&&cell.row()==0&&cursorRect().top()<=cursorRect(cell.firstCursorPosition()).top();
             const bool leaveBelow=event->key()==Qt::Key_Down&&cell.row()+1==nativeTable->rows()&&cursorRect().bottom()>=cursorRect(cell.lastCursorPosition()).bottom();
-            if((leaveAbove||leaveBelow)&&event->modifiers()==Qt::NoModifier&&!textCursor().hasSelection()){
+            if((leaveAbove||leaveBelow)&&navigationModifiers==Qt::NoModifier&&!textCursor().hasSelection()){
                 QTextCursor outside(document());outside.setPosition(leaveAbove?qMax(0,nativeTable->firstPosition()-2):qMin(document()->characterCount()-1,nativeTable->lastPosition()+2));
                 {QScopedValueRollback<bool> guard(movingCursor,true);setTextCursor(outside);}
                 revealNativeCell(textCursor());nativeTable.clear();activateCaretRegion();event->accept();return;
@@ -1342,9 +1506,6 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
                 event->accept();return;
             }
         }
-        // Qt can tag native arrow keys with KeypadModifier (including macOS
-        // arrows). It identifies the key, not an extra navigation command.
-        const auto navigationModifiers=event->modifiers()&~Qt::KeypadModifier;
         const bool horizontalArrow=(event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)&&
             navigationModifiers==Qt::NoModifier&&!textCursor().hasSelection();
         auto renderedInline=[this](int i){
@@ -1563,14 +1724,22 @@ void LiveEditor::paintEvent(QPaintEvent *event){
         for(const auto &item:axisControls()){
             controls.setPen(Qt::NoPen);
             if(axisSource==item.start&&axisIndex>=0){const auto &rects=axisRow?item.rows:item.columns;
-                if(axisIndex<rects.size()){
+                if(axisLast>=0&&qMax(axisIndex,axisLast)<rects.size()){
                     controls.save();
                     controls.setBrush(QColor(137,102,194,40));
-                    controls.drawRect(rects[axisIndex]);
+                    const QRectF selected=rects[qMin(axisIndex,axisLast)].united(rects[qMax(axisIndex,axisLast)]);
+                    controls.drawRect(selected);
                     controls.setBrush(Qt::NoBrush);controls.setPen(QPen(QColor("#8856bc"),2));
-                    controls.drawRect(rects[axisIndex]);
+                    controls.drawRect(selected);
                     controls.restore();
                 }}
+            if(cellRangeDragging&&cellRangeTable==item.table){
+                const QRectF rows=item.rows[qMin(cellAnchorRow,cellEndRow)].united(item.rows[qMax(cellAnchorRow,cellEndRow)]);
+                const QRectF columns=item.columns[qMin(cellAnchorColumn,cellEndColumn)].united(item.columns[qMax(cellAnchorColumn,cellEndColumn)]);
+                const QRectF selected=rows.intersected(columns);
+                controls.save();controls.setBrush(QColor(137,102,194,40));
+                controls.setPen(QPen(QColor("#8856bc"),2));controls.drawRect(selected);controls.restore();
+            }
             auto grip=[&](QRectF rect,bool row){controls.setPen(Qt::NoPen);controls.setBrush(QColor("#eee9f7"));controls.drawRoundedRect(rect,3,3);controls.setBrush(QColor("#80708f"));
                 for(int i=0;i<3;++i)controls.drawEllipse(row?QPointF(rect.center().x(),rect.top()+3+i*4):QPointF(rect.left()+3+i*4,rect.center().y()),1,1);};
             for(int i=0;i<item.rows.size();++i){const auto &rect=item.rows[i];
@@ -1713,7 +1882,15 @@ void LiveEditor::activateCaretRegion(){
         const int i=regionAt(textCursor().position());
         if(isResourceRegion(i)&&regions[i].sourceStart!=resourceSourceEditStart)return;
         if(!isResourceRegion(i))resourceSourceEditStart=-1;
-        if(i>=0&&i!=active)rebuild(i,sourcePosition(textCursor().position())-regions[i].sourceStart);
+        if(i>=0&&i!=active){
+            // Qt's empty paragraphs around a table can share its source
+            // region, especially at the document start. Activating that
+            // region would map an outside caret straight back into a cell.
+            const auto &region=regions[i];
+            for(auto block=document()->findBlock(region.start);block.isValid()&&block.position()<=region.end;block=block.next())
+                if(QTextCursor(block).currentTable())return;
+            rebuild(i,sourcePosition(textCursor().position())-region.sourceStart);
+        }
     }
 
 bool LiveEditor::isResourceRegion(int index) const{
@@ -2023,6 +2200,9 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
                     QTextBlockFormat heading;
                     headingStyle(format.headingLevel(),renderedFont,heading);
                     format.setLineHeight(heading.lineHeight(),QTextBlockFormat::FixedHeight);
+                }else if(QTextCursor(block).currentTable()){
+                    format.setTopMargin(0);format.setBottomMargin(0);
+                    format.setLineHeight(0,QTextBlockFormat::SingleHeight);
                 }else setBodyLineHeight(format,renderedFont);
                 if(block.text().contains(QChar::ObjectReplacementCharacter))fitInlineImages(block,rendered);
             }

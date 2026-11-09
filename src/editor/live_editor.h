@@ -36,10 +36,16 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
     void layoutNativeTable(QTextTable *table);
     void layoutNativeTables();
     bool nativeSelection() const;
+    QPointer<QTextTable> cellRangeTable;
+    int cellRangeSource=-1,cellAnchorRow=0,cellAnchorColumn=0,cellEndRow=0,cellEndColumn=0;
+    bool cellRangePressed=false,cellRangeDragging=false;
+    QPoint cellRangeOrigin;
+    bool editSelectedCells(bool copy,bool clear);
     QTimer axisDragScroll;
     struct AxisControls {int start;QPointer<QTextTable> table;QRectF frame;QList<QRectF> rows,columns;QRectF addRow,addColumn;};
     QList<AxisControls> axisControls() const;
-    int axisSource=-1,axisIndex=-1,axisBoundary=-1;
+    int axisSource=-1,axisIndex=-1,axisLast=-1,axisBoundary=-1;
+    bool removeSelectedAxes();
     bool axisRow=true,axisPressed=false,axisStarted=false;
     QPoint axisOrigin,axisPoint,tableHoverPoint{-100,-100};
     QString axisSnapshot;
@@ -82,7 +88,7 @@ public:
     bool editResourceSourceAt(int sourceOffset);
     bool moveTableBlockAt(int sourceOffset,int direction);
     bool moveMarkdownTableTo(int sourceOffset,int boundary);
-    bool reorderMarkdownAxisAt(int sourceOffset,bool row,int from,int boundary);
+    bool reorderMarkdownAxisAt(int sourceOffset,bool row,int from,int boundary,int count=1);
     bool changeMarkdownTableAt(int sourceOffset,int row,int column,const QString &operation);
     void rebuild(int chosen,int offset,int forcedTarget=-1);
 protected:

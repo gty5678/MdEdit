@@ -70,6 +70,27 @@ int runTableEditTests(){
     CHECK(!inlineTable->cellAt(1,0).firstCursorPosition().block().text().contains("$x^2$"));
     CHECK(widget.markdown().contains("**changed**"));
 
+    // Native arrows may carry KeypadModifier. Every bottom-row cell must
+    // allow Down to leave, and every top-row cell must allow Up to leave.
+    for(const QString &navigationSource:QStringList{
+        original,"| Name | Value |\n| --- | --- |\n| alpha | 10 |"})
+    for(const auto modifiers:{Qt::NoModifier,Qt::KeypadModifier}){
+        for(const bool down:{true,false})for(int column=0;column<2;++column){
+            widget.setMarkdown(navigationSource);
+            QTextTable *table=nullptr;
+            for(auto block=live->document()->begin();block.isValid();block=block.next())
+                if((table=QTextCursor(block).currentTable()))break;
+            CHECK(table);
+            live->setTextCursor(down?table->cellAt(table->rows()-1,column).lastCursorPosition():
+                table->cellAt(0,column).firstCursorPosition());
+            QKeyEvent arrow(QEvent::KeyPress,down?Qt::Key_Down:Qt::Key_Up,modifiers);
+            QApplication::sendEvent(live,&arrow);
+            if(live->textCursor().currentTable())qWarning()<<"Exit failed"<<down<<column<<modifiers<<navigationSource;
+            CHECK(!live->textCursor().currentTable());
+            CHECK(widget.markdown()==navigationSource);
+        }
+    }
+
     // Selecting every native cell removes the table as one undoable edit.
     for(int key:{Qt::Key_Backspace,Qt::Key_Delete}){
         widget.setMarkdown(original);
@@ -135,8 +156,8 @@ int runTableEditTests(){
     CHECK(live->changeMarkdownTableAt(original.indexOf("| Name"),1,1,"removeColumn"));CHECK(widget.markdown().contains("| Name |"));CHECK(!widget.markdown().contains("Value"));
     widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
     widget.setMarkdown(original);QApplication::processEvents();
-    auto sendMouse=[&](QEvent::Type type,const QPoint &point,Qt::MouseButton button,Qt::MouseButtons buttons){
-        QMouseEvent event(type,point,live->viewport()->mapToGlobal(point),button,buttons,Qt::NoModifier);QApplication::sendEvent(live->viewport(),&event);
+    auto sendMouse=[&](QEvent::Type type,const QPoint &point,Qt::MouseButton button,Qt::MouseButtons buttons,Qt::KeyboardModifiers modifiers=Qt::NoModifier){
+        QMouseEvent event(type,point,live->viewport()->mapToGlobal(point),button,buttons,modifiers);QApplication::sendEvent(live->viewport(),&event);
     };
     CHECK(live->moveMarkdownTableTo(original.indexOf("| Name"),0));CHECK(widget.markdown().startsWith("| Name"));
     widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
@@ -153,6 +174,7 @@ int runTableEditTests(){
     sendMouse(QEvent::MouseMove,interior,Qt::NoButton,Qt::NoButton);CHECK(gripColor()==hidden);
     const QImage nativeGrid=live->viewport()->grab().toImage();
     QPoint select=rowPoint(1);sendMouse(QEvent::MouseButtonPress,select,Qt::LeftButton,Qt::LeftButton);sendMouse(QEvent::MouseButtonRelease,select,Qt::LeftButton,Qt::NoButton);
+    CHECK(!live->textCursor().hasSelection());
     // Compare the painted selection edges to the native grid, rather than
     // relying on frameBoundingRect (which includes a first-cell offset).
     const QImage selectedRow=live->viewport()->grab().toImage();
@@ -183,6 +205,108 @@ int runTableEditTests(){
     start=colPoint(1);target=colPoint(0);target.setX(target.x()-30);
     sendMouse(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton);sendMouse(QEvent::MouseMove,target,Qt::NoButton,Qt::LeftButton);sendMouse(QEvent::MouseButtonRelease,target,Qt::LeftButton,Qt::NoButton);
     CHECK(widget.markdown().contains("| Value | Name |"));CHECK(widget.markdown().contains("| ---: | :--- |"));widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    // Drag inside the grid selects a rectangle, independent of text offsets.
+    auto cellPoint=[&](int row,int column){
+        const auto rect=live->document()->documentLayout()->blockBoundingRect(geometry()->cellAt(row,column).firstCursorPosition().block());
+        return rect.center().toPoint()-QPoint(live->horizontalScrollBar()->value(),live->verticalScrollBar()->value());
+    };
+    auto rectangle=[&](int r1,int c1,int r2,int c2){
+        const auto from=cellPoint(r1,c1),to=cellPoint(r2,c2);
+        sendMouse(QEvent::MouseButtonPress,from,Qt::LeftButton,Qt::LeftButton);
+        sendMouse(QEvent::MouseMove,to,Qt::NoButton,Qt::LeftButton);
+        sendMouse(QEvent::MouseButtonRelease,to,Qt::LeftButton,Qt::NoButton);
+        return !live->textCursor().hasSelection();
+    };
+    CHECK(rectangle(1,0,2,1));
+    const auto rectangleEdges=horizontalEdges(live->viewport()->grab().toImage(),true);
+    CHECK(!rectangleEdges.isEmpty());
+    for(int edge:rectangleEdges){
+        bool aligned=false;for(int grid:gridEdges)aligned|=qAbs(edge-grid)<=2*selectedRow.devicePixelRatio();
+        CHECK(aligned);
+    }
+    CHECK(live->clipboardNativeCell(false));CHECK(QApplication::clipboard()->text()=="alpha\t10\nbeta\t20");
+    CHECK(widget.markdown()==original);
+    CHECK(rectangle(2,1,0,1));
+    CHECK(live->clipboardNativeCell(false));CHECK(QApplication::clipboard()->text()=="Value\n10\n20");
+    QKeyEvent clearCells(QEvent::KeyPress,Qt::Key_Delete,Qt::NoModifier);QApplication::sendEvent(live,&clearCells);
+    CHECK(geometry()->rows()==3&&geometry()->columns()==2);
+    CHECK(widget.markdown().contains("alpha")&&widget.markdown().contains("beta"));
+    CHECK(!widget.markdown().contains("Value")&&!widget.markdown().contains("10")&&!widget.markdown().contains("20"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    CHECK(rectangle(2,1,1,0));CHECK(live->clipboardNativeCell(true));
+    CHECK(QApplication::clipboard()->text()=="alpha\t10\nbeta\t20");
+    CHECK(geometry()->rows()==3&&geometry()->columns()==2);
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    // Rectangles can be projected onto either axis for grouped movement.
+    CHECK(rectangle(1,0,2,1));
+    start=rowPoint(1);target=rowPoint(0);target.setY(target.y()-10);
+    sendMouse(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton);
+    sendMouse(QEvent::MouseMove,target,Qt::NoButton,Qt::LeftButton);
+    sendMouse(QEvent::MouseButtonRelease,target,Qt::LeftButton,Qt::NoButton);
+    CHECK(widget.markdown().indexOf("alpha")<widget.markdown().indexOf("beta"));
+    CHECK(widget.markdown().indexOf("beta")<widget.markdown().indexOf("Name"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    const QString wide="Before.\n\n| H0 | H1 | H2 | H3 |\n| --- | --- | --- | --- |\n| a0 | a1 | a2 | a3 |\n| b0 | b1 | b2 | b3 |\n| c0 | c1 | c2 | c3 |\n\nAfter.\n";
+    auto selectedAction=[&](const char *name){
+        const auto point=cellPoint(1,1);
+        QContextMenuEvent event(QContextMenuEvent::Mouse,point,live->viewport()->mapToGlobal(point));
+        QApplication::sendEvent(live->viewport(),&event);
+        const auto menus=live->findChildren<QMenu *>("tableContextMenu");
+        if(menus.isEmpty())return false;
+        auto *popup=menus.last();auto *action=popup->findChild<QAction *>(name);
+        const bool available=action&&action->isEnabled();
+        if(available)action->trigger();popup->close();QApplication::processEvents();return available;
+    };
+    widget.setMarkdown(wide);CHECK(rectangle(1,1,2,2));
+    CHECK(selectedAction("moveSelectedColumnsRight"));CHECK(widget.markdown().contains("| H0 | H3 | H1 | H2 |"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==wide);
+    CHECK(rectangle(1,1,2,2));CHECK(selectedAction("moveSelectedRowsDown"));
+    CHECK(widget.markdown().indexOf("c0")<widget.markdown().indexOf("a0"));
+    CHECK(widget.markdown().indexOf("a0")<widget.markdown().indexOf("b0"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==wide);
+    CHECK(rectangle(1,1,2,2));CHECK(selectedAction("removeSelectedRows"));
+    CHECK(geometry()->rows()==2&&geometry()->columns()==4);
+    CHECK(!widget.markdown().contains("a0")&&!widget.markdown().contains("b0"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==wide);
+    CHECK(rectangle(1,1,2,2));CHECK(selectedAction("removeSelectedColumns"));
+    CHECK(geometry()->columns()==2&&geometry()->rows()==4);
+    CHECK(widget.markdown().contains("| H0 | H3 |"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==wide);
+    CHECK(rectangle(1,1,2,2));start=colPoint(1);target=colPoint(3);target.setX(target.x()+30);
+    sendMouse(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton);
+    sendMouse(QEvent::MouseMove,target,Qt::NoButton,Qt::LeftButton);
+    sendMouse(QEvent::MouseButtonRelease,target,Qt::LeftButton,Qt::NoButton);
+    CHECK(widget.markdown().contains("| H0 | H3 | H1 | H2 |"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==wide);
+    widget.setMarkdown(original);
+    const auto clickCell=cellPoint(1,0);
+    sendMouse(QEvent::MouseButtonPress,clickCell,Qt::LeftButton,Qt::LeftButton);
+    sendMouse(QEvent::MouseButtonRelease,clickCell,Qt::LeftButton,Qt::NoButton);
+    CHECK(live->textCursor().currentTable());CHECK(!live->textCursor().hasSelection());
+    // Shift-click extends structural selections without selecting cell text.
+    auto chooseAxis=[&](QPoint point,Qt::KeyboardModifiers modifiers=Qt::NoModifier){
+        sendMouse(QEvent::MouseButtonPress,point,Qt::LeftButton,Qt::LeftButton,modifiers);
+        sendMouse(QEvent::MouseButtonRelease,point,Qt::LeftButton,Qt::NoButton,modifiers);
+        return !live->textCursor().hasSelection();
+    };
+    CHECK(chooseAxis(rowPoint(1)));CHECK(chooseAxis(rowPoint(2),Qt::ShiftModifier));
+    CHECK(live->clipboardNativeCell(false));CHECK(QApplication::clipboard()->text()=="alpha\t10\nbeta\t20");
+    QKeyEvent deleteAxes(QEvent::KeyPress,Qt::Key_Delete,Qt::NoModifier);QApplication::sendEvent(live,&deleteAxes);
+    CHECK(!widget.markdown().contains("alpha")&&!widget.markdown().contains("beta"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    CHECK(chooseAxis(colPoint(1)));CHECK(chooseAxis(colPoint(0),Qt::ShiftModifier));
+    CHECK(live->clipboardNativeCell(false));CHECK(QApplication::clipboard()->text()=="Name\tValue\nalpha\t10\nbeta\t20");
+    CHECK(live->clipboardNativeCell(true));CHECK(!widget.markdown().contains("|"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    CHECK(chooseAxis(rowPoint(1)));CHECK(chooseAxis(rowPoint(2),Qt::ShiftModifier));
+    start=rowPoint(1);target=rowPoint(0);target.setY(target.y()-10);
+    sendMouse(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton);
+    sendMouse(QEvent::MouseMove,target,Qt::NoButton,Qt::LeftButton);
+    sendMouse(QEvent::MouseButtonRelease,target,Qt::LeftButton,Qt::NoButton);
+    CHECK(!live->textCursor().hasSelection());
+    CHECK(widget.markdown().indexOf("alpha")<widget.markdown().indexOf("beta"));
+    CHECK(widget.markdown().indexOf("beta")<widget.markdown().indexOf("Name"));
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
     auto frame=live->document()->documentLayout()->frameBoundingRect(geometry()).translated(-live->horizontalScrollBar()->value(),-live->verticalScrollBar()->value());
     QPoint plus(qRound(frame.center().x()),qRound(frame.bottom()+10));sendMouse(QEvent::MouseMove,plus,Qt::NoButton,Qt::NoButton);sendMouse(QEvent::MouseButtonPress,plus,Qt::LeftButton,Qt::LeftButton);sendMouse(QEvent::MouseButtonRelease,plus,Qt::LeftButton,Qt::NoButton);
     CHECK(geometry()->rows()==4);widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
