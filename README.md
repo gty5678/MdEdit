@@ -1,12 +1,97 @@
-# MdEdit
+<div align="center">
+  <h1>MdEdit</h1>
+  <p><strong>专注书写，资源随行</strong></p>
+  <p>一个本地 Markdown 桌面编辑器，支持 Live 编辑、离线公式排版与文档资源预览。</p>
+  <br />
 
-基于 Qt 6 / C++17 / CMake / Ninja 的单文档 Markdown 编辑器，使用 vcpkg 管理依赖，提供 Windows、macOS 和 Linux 构建配置。
+![Qt 6.12.0][badge-qt]
+![C++17][badge-cpp]
+![CMake 3.24+][badge-cmake]
+![Platform][badge-platform]
 
-“视图”菜单提供“Live 编辑 / 源码”切换功能。默认在同一文档区域直接编辑：光标进入段落时显示该段 Markdown 源码，离开后恢复排版与公式。空行分隔编辑段，代码块和多行公式保持完整。Ctrl+E 可切换为全文源码编辑。快捷键中的 Ctrl 在 macOS 上对应 Cmd；应用采用单视口，不提供分屏模式。
+<br />
 
-## 使用
+[📖 使用说明](#usage)
+[🛠 开发指南](docs/development.md)
+[🧩 嵌入指南](docs/embedding.md)
+[💬 问题反馈][link-issues]
 
-Windows 打包后运行 `dist/windows/bin/MdEdit.exe`。在启动页点击“打开”，或按 Ctrl+O 选择 Markdown 文件。
+</div>
+
+<p align="center">
+  <a href="#download">获取与运行</a> •
+  <a href="#features">特性</a> •
+  <a href="#usage">使用说明</a> •
+  <a href="#resources">资源预览</a> •
+  <a href="#privacy">隐私与数据</a> •
+  <a href="#development">开发与技术</a> •
+  <a href="#references">参考与依赖</a>
+</p>
+
+---
+
+<a id="download"></a>
+
+## 获取与运行
+
+项目提供 **Windows、macOS 和 Linux** 构建配置，构建步骤见 [开发指南](docs/development.md)。
+
+| **平台** | **构建后运行** |
+| --- | --- |
+| **Windows** | 打包后运行 `dist/windows/bin/MdEdit.exe` |
+| **macOS** | 打包后打开 `dist/macos/MdEdit.app`，另生成 `MdEdit.dmg` |
+| **Linux** | 打包安装到 `dist/linux`，运行 `dist/linux/bin/MdEdit` |
+
+> 当前工程要求 Qt 6.12.0，仓库固定的 vcpkg baseline 提供 Qt 6.11.3，现有 vcpkg 预设尚不能直接满足版本要求。本机 Qt 6.12.0 配置、依赖准备与打包限制请先阅读开发指南。
+
+---
+
+<a id="features"></a>
+
+## 特性
+
+### 已实现
+
+| **功能** | **说明** | **状态** |
+| --- | --- | --- |
+| **Live 编辑** | 在同一文档区域编辑，当前段落显示源码，离开后恢复排版 | ✅ |
+| **源码模式** | 一键切换全文源码，保留光标与选区方向 | ✅ |
+| **Markdown 排版** | 标题、列表、任务列表、引用、代码块与表格 | ✅ |
+| **行内样式** | 加粗、斜体、删除线与 `==高亮==`，输入时即时显示 | ✅ |
+| **数学公式** | MicroTeX 离线排版，支持行内与多行公式 | ✅ |
+| **代码块** | 基础语法高亮与一键复制代码正文 | ✅ |
+| **表格编辑** | 单元格直接编辑，行列操作、手柄拖拽与边缘追加 | ✅ |
+| **图片预览** | 常见图片格式与自定义显示宽度 | ✅ |
+| **PDF 阅读** | 连续多页预览、内部滚动与页码跳转 | ✅ |
+| **CSV 编辑** | 正文摘要预览、独立编辑面板与冲突检查 | ✅ |
+| **文本与附件** | 本地文本摘要预览，附件使用系统默认程序打开 | ✅ |
+| **文件保存** | UTF-8 自动保存与原子写入 | ✅ |
+| **编辑工具** | 查找替换、缩进、段落操作与撤销 | ✅ |
+| **字号设置** | 9–30 pt，默认 14 pt，设置重启后保留 | ✅ |
+| **组件嵌入** | 通过 `MdEdit::Editor` 在其他 Qt 应用中复用 | ✅ |
+
+### 待完善
+
+| **方向** | **当前边界** | **状态** |
+| --- | --- | --- |
+| **资源更新** | 尚未自动监视外部文件变化 | 待实现 |
+| **更多资源类型** | 尚未实现 DXF、GLB 预览 | 待实现 |
+| **大文档与大表格** | 尚未实现完整虚拟布局与大表格虚拟化 | 待完善 |
+| **Markdown 兼容** | 复杂嵌套、跨块链接定义和源码映射仍需完善 | 持续完善 |
+
+实现范围与后续工作见 [资源编辑器基础说明](docs/resource-editor-foundation.md)；功能差异见 [Obsidian 行为对照](docs/obsidian-behavior-comparison.md)。
+
+---
+
+<a id="usage"></a>
+
+## 使用说明
+
+应用采用单文档、单视口编辑。“视图”菜单可切换 **Live 编辑 / 源码**；空行分隔编辑段，代码块和多行公式保持完整。
+
+### 编辑与快捷键
+
+在启动页点击“打开”，或按 Ctrl+O 选择 Markdown 文件。
 
 - Ctrl+E：切换 Live / 全文源码编辑，保留光标位置和选区方向。
 - Live 模式中，Enter 自动延续无序列表、有序列表和任务列表；新任务默认未勾选，空列表项按 Enter 退出列表。
@@ -21,7 +106,7 @@ Live 编辑中，输入 `*`、`**`、`***`、`~~` 或 `==` 后，后续文字立
 
 正文支持 `==文字==` 浅黄色背景高亮，可与加粗、斜体和删除线组合；代码中的标记保持原样。
 
-## 数学公式
+### 数学公式
 
 非当前段落显示公式排版；进入公式所在段落可直接修改 LaTeX 源码。
 
@@ -37,9 +122,9 @@ $$
 $$
 ```
 
-使用内置 MicroTeX 与随程序部署的字体离线排版，不需要浏览器、网络或系统 LaTeX。代码块及行内代码不识别为公式。无法解析的公式保留源码，预览按钮的提示显示错误。公式兼容范围以 MicroTeX 为准，不支持完整 LaTeX 文档或任意宏包。
+使用内置 MicroTeX 与随程序部署的字体离线排版，不需要浏览器、网络或系统 LaTeX。代码块及行内代码不识别为公式。无法解析的公式保留源码。公式兼容范围以 MicroTeX 为准，不支持完整 LaTeX 文档或任意宏包。
 
-## 表格编辑
+### 表格编辑
 
 原生 Markdown 表格可直接点击单元格编辑，支持中文输入法、复制/剪切/粘贴、加粗和斜体，修改同步回 Markdown 源码并可撤销。
 
@@ -49,6 +134,16 @@ $$
 - 鼠标移到表格底部或右侧边缘时显示“＋”，用于追加行或列；“编辑”菜单也可插入新表格。
 
 CSV 使用独立编辑面板，详见下方资源预览说明。
+
+### 设置与查找
+
+在“文件 → 设置”中调整基础字号（macOS 也可能位于应用设置菜单），快捷键 Ctrl/Cmd+,。字号即时作用于正文、源码、界面和行号，标题按层级比例缩放；提供“恢复默认值”。
+
+查找采用字面文本匹配，支持区分大小写与循环查找；替换支持单次、全部替换，操作可撤销。快捷键在 macOS 上使用 Cmd，具体以菜单显示为准。
+
+---
+
+<a id="resources"></a>
 
 ## 外部资源预览
 
@@ -88,131 +183,58 @@ PDF 使用 Qt PDF Widgets 查看器，按宽度适配并连续显示多页。可
 
 只有到达整份 PDF 顶部后继续向上滚动，或到底部后继续向下滚动，才滚动外层正文。加密或损坏文件显示错误提示。
 
-## 源码结构
+---
 
-- `src/main.cpp`：应用初始化、公式引擎生命周期与启动入口。
-- `src/platform.h`：平台字体、快捷键标签和公式资源路径。
-- `src/markdown/scanner.*`：代码/公式边界扫描、代码正文提取与词法着色。
-- `src/markdown/renderer.*`：Markdown 排版、共享文本样式与公式图像处理。
-- `src/editor/highlighter.*`：全文源码语法高亮。
-- `src/editor/numbered_editor.h`：行号组件与通用编辑器模板。
-- `src/editor/live_editor.*`：Live 编辑、源文档位置映射、输入事件与排版缓存。
-- `src/editor/markdown_editor_widget.*`：可嵌入组件、编辑命令与模式切换。
-- `src/editor/markdown/block_parser.*`：文档块识别与 UTF-16 源码范围。
-- `src/editor/resources/resource_manager.*`：本地资源解析、异步加载与缓存。
-- `src/editor/render/renderer_registry.*`：资源预览绘制分派。
-- `src/editor/tables/`：表格数据模型与 CSV 编辑面板。
-- `src/editor/view/markdown_preview_widget.*`：独立预览基础组件。
-- `src/window.*`：主窗口、菜单、文件读写和设置。
-- `tests/app_tests.*`：现有 `--smoke-test`、`--edit-menu-test`、`--table-gutter-test` 测试入口；保留原命令行调用方式。
+<a id="privacy"></a>
 
-## 构建
+## 隐私与数据
 
-需要 Git、CMake 3.24+、Ninja 和 C++17 编译器。Qt 最低要求 6.12.0，需包含 Widgets、SVG、PDF 和 PDF Widgets 模块。当前 vcpkg baseline 提供 Qt 6.11.3，使用该 baseline 的 Windows、macOS 和 Linux 预设暂时无法满足版本要求。macOS 可使用下文的本机 Qt 6.12.0 预设。
+- **本地文件**：正文保存在用户打开的 Markdown 文件中，相对资源路径以该文件所在目录为基准。
+- **保存方式**：停止输入片刻后自动写回文件，关闭窗口时立即保存尚未写入的修改；正文使用 UTF-8 原子写入。
+- **资源加载**：资源预览仅加载本地文件，远程资源显示错误，不发起网络请求。
+- **离线公式**：公式引擎与字体随程序部署，排版无需浏览器、网络或系统 LaTeX。
+- **CSV 数据**：面板直接保存原 CSV，保存前检查外部修改；CSV 修改不进入 Markdown 正文的撤销历史。
 
-PDF 预览依赖 `Qt6::Pdf` 和 `Qt6::PdfWidgets`，本机 Qt kit 需通过 Qt Maintenance Tool 安装匹配的 Qt PDF 模块。vcpkg 清单使用 `qtwebengine` 的 `pdf` feature，关闭默认 features，不启用 WebEngine 浏览器。打包时需一并部署 Qt PDF 与 PDF Widgets 运行库。
+---
 
-先按 [vcpkg 官方说明](https://learn.microsoft.com/vcpkg/get_started/get-started) 安装并 bootstrap vcpkg，将环境变量 `VCPKG_ROOT` 指向该目录。首次配置会下载并编译 Qt 等依赖，耗时和磁盘占用较大；后续使用 vcpkg 缓存。
+<a id="development"></a>
 
-### Windows（MinGW 打包）
+## 开发与技术
 
-安装 VS Code 和 [MSYS2](https://www.msys2.org/)。在 **MSYS2 MINGW64** 终端安装工具链：
+技术栈为 **Qt 6 / C++17 / CMake / Ninja**，使用 **vcpkg** 管理依赖，公式排版采用 **MicroTeX**，PDF 阅读采用 **Qt PDF Widgets**。
+
+👉 [开发指南：依赖、跨平台构建、VS Code 调试与测试](docs/development.md)
+
+👉 [嵌入指南：在 Qt 应用中复用 MarkdownEditorWidget](docs/embedding.md)
+
+👉 [综合测试文档与资源示例](综合测试.md)
+
+当前 CTest 包含 10 项回归，覆盖编辑、表格、PDF、CSV、样式、行距、公式与嵌入组件。配置并构建后，可使用对应测试预设运行，例如：
 
 ```bash
-pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
-```
-
-将 MSYS2 的 `mingw64\bin`（默认 `C:\msys64\mingw64\bin`）加入 Windows 用户 `Path`，并将 `VCPKG_ROOT` 设为已运行 `bootstrap-vcpkg.bat` 的 vcpkg 目录。vcpkg 的目标和宿主 triplet 均为 `x64-mingw-dynamic`。本机 VS Code 调试步骤见下文的 Windows Qt 6.12.0 配置。
-
-- 运行任务 `MdEdit: Package Windows`，或在 VS Code 集成终端执行 `.\build.cmd`。脚本会构建 Release、运行冒烟测试并安装到 `dist/windows`。
-
-Windows 使用 `build/windows-debug` 和 `build/windows-release`，共用 `build/windows-deps/vcpkg_installed`。已有的旧版 Windows 构建缓存可以留在原目录，新预设会在独立目录重新配置。需要清除新预设缓存时，在 CMake Tools 中运行“Delete Cache and Reconfigure”，或执行 `cmake --fresh --preset windows-release`。
-
-### macOS 和 Linux
-
-macOS：安装 Xcode Command Line Tools、CMake 和 Ninja：
-
-```bash
-brew install cmake ninja autoconf autoconf-archive automake libtool
-export VCPKG_ROOT="$HOME/vcpkg"
-bash build-macos.sh
-```
-
-如果项目目录内已有 bootstrap 完成的 `.vcpkg`，脚本会自动使用它，无需设置 `VCPKG_ROOT`。
-
-生成 `dist/macos/MdEdit.app` 和 `dist/macos/MdEdit.dmg`，并从临时目录运行打包后的冒烟测试。默认使用当前机器架构；切换架构时应使用新的构建目录，并匹配 vcpkg triplet。应用未签名、公证。
-
-Linux：安装 C++ 工具链、CMake、Ninja、pkg-config 和 Qt XCB 后端需要的系统开发包。Debian/Ubuntu 可从以下包开始，具体以 vcpkg 配置诊断为准：
-
-```bash
-sudo apt-get install build-essential cmake ninja-build pkg-config autoconf automake libtool \
-  libgl1-mesa-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev \
-  libxrender-dev libxcb1-dev libxcb-cursor-dev libxcb-image0-dev libxcb-keysyms1-dev \
-  libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-shm0-dev \
-  libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-x11-dev
-export VCPKG_ROOT="$HOME/vcpkg"
-bash build-linux.sh
-```
-
-各平台的 vcpkg Release 预设为 `windows-release`、`macos-release` 和 `linux-release`。macOS 和 Linux 的 Release 构建目录是 `build-vcpkg`。更换 triplet 或编译器时请使用新的构建目录。使用 vcpkg 预设时，应清除此前为官方 Qt kit 设置的 `Qt6_DIR` 或 `CMAKE_PREFIX_PATH`。
-
-Linux 可在 VS Code 里用 `MdEdit Debug (Linux)` 调试，系统需安装 GDB，并设置好 `VCPKG_ROOT`。Debug 使用 `linux-debug` 预设，产物位于 `build/linux-debug`。
-
-architecture、table-edit、live-pdf 和 live-csv 测试统一使用 offscreen 插件；其他 CTest 用例在 Windows/macOS 使用原生平台插件，Linux 使用 offscreen 插件。测试覆盖编辑操作、资源加载、表格、PDF、行内样式、行距、嵌入组件及公式排版；冒烟测试生成 `math-smoke.png`。Linux 安装目录包含资源与许可证，运行依赖的部署支持取决于 Qt 版本和系统。
-
-## VS Code（本机 Windows x64 / Qt 6.12.0）
-
-用 VS Code 打开项目根目录并安装 Microsoft C/C++ 扩展（`ms-vscode.cpptools`）。在“运行和调试”中选择 **MdEdit Debug (Windows)**，打开 `src/main.cpp` 设置断点，然后按 F5。构建任务自动加载 Visual Studio 的 x64 MSVC 环境，配置并编译 Debug 版本，并将 Qt DLL 和平台插件部署到 `build/windows-qt-debug`。Ctrl+F5 可直接运行。
-
-此预设使用本机 `C:/Qt/6.12.0/msvc2022_64` 和 `build/windows-debug-deps/x64-windows` 下用相同工具链编译的 Debug 版 tinyxml2 和 MicroTeX。后者位于被 Git 忽略的 `build` 目录。换机器或清空该目录后，需要重新构建这两个 Debug 依赖并安装到该前缀。MicroTeX 使用 `ports/microtex` 中的源码版本、补丁及 CMake 配置。
-
-## VS Code（本机 macOS / Qt 6.12.0）
-
-已在 `.vscode/settings.json` 为 CodeLLDB 配置 Command Line Tools 自带的 `debugserver` 路径。已配置 CMake Tools、C/C++ 和 CodeLLDB 扩展推荐；需安装这些扩展。使用 VS Code 打开项目根目录后：
-
-- 打开“运行和调试”，选择 `MdEdit Debug (macOS)`，按 F5 自动配置、编译并启动调试，可在 `src/main.cpp` 设置断点。
-- 选择 `MdEdit Release (macOS)`，按 F5 构建并启动 Release；优化后的代码可能无法逐行调试。按 Ctrl+F5 可直接运行。
-- 按 Cmd+Shift+B 默认构建 Debug；通过“任务：运行任务”选择 `CMake: Build Release` 可只构建 Release。
-- CMake Tools 的配置预设选择 `macos-qt-debug` 或 `macos-qt-release`，分别使用独立构建目录 `build/macos-qt-debug`、`build/macos-qt-release`。
-
-这两个预设使用 `$HOME/Qt/6.12.0/macos` 和本次已准备的 `build-local/qt612-deps`（使用同一官方 Qt 重新编译的 MicroTeX），tinyxml2 来自 `build-vcpkg/vcpkg_installed/arm64-osx`。这些依赖目录需要保留；换机器或删除依赖后需要重新准备。它们与原有 vcpkg 构建预设使用不同的构建目录。
-
-也可在终端执行：
-
-```bash
-cmake --preset macos-qt-debug
-cmake --build --preset macos-qt-debug --parallel
 ctest --preset macos-qt-debug
-# Release 将上述预设名替换为 macos-qt-release
 ```
 
-## 第三方依赖
+---
 
-- Qt：vcpkg `qtbase`（Widgets、PNG/JPEG、各平台后端）、`qtsvg`（SVG 图片）和 `qtimageformats`（WebP、TIFF）。图片仅支持 PNG、SVG、JPG、JPEG、BMP、GIF、WebP、TIF、TIFF；其他文件显示单行附件，可用系统默认程序打开。
-- tinyxml2：vcpkg 官方 port。
-- [MicroTeX](https://github.com/NanoMichael/MicroTeX)：项目的 `ports/microtex` overlay port，固定上游提交及 SHA512，构建 Qt 6 静态后端；通过补丁保留 Qt 6 字体 API 和资源路径修复，不编译示例。应用通过 `find_package(MicroTeX)` 使用安装后的库。
+<a id="references"></a>
 
-字体资源从 vcpkg 安装目录部署到可执行文件旁的 `res`（macOS 为 `Contents/Resources/res`）；依赖许可证复制到 `licenses`。升级依赖请运行 `vcpkg x-update-baseline` 并重新验证。升级 MicroTeX 时需同时更新提交、SHA512 和兼容补丁。
+## 参考与依赖
 
-项目在 `vcpkg-configuration.json` 中明确使用官方 Git registry（`https://github.com/Microsoft/vcpkg`），并固定 baseline，避免本机针对小写组织名 URL 的镜像重定向导致 `not our ref`。需要能访问 GitHub；若仍失败，查看 `build-vcpkg/vcpkg-manifest-install.log`，不要移除版本锁定。
+- [Qt](https://www.qt.io/)：桌面界面、文档排版、图片与 PDF 支持。
+- [MicroTeX](https://github.com/NanoMichael/MicroTeX)：离线数学公式排版，使用仓库内 overlay port 构建。
+- [tinyxml2](https://github.com/leethomason/tinyxml2)：XML 解析依赖。
+- [vcpkg](https://github.com/microsoft/vcpkg)：依赖管理与版本锁定。
+- [DarkEye](https://github.com/gty5678/darkeye)：README 结构与排版参考。
 
-## Obsidian 行为对照
+依赖许可证随打包产物部署至 `licenses`；公式字体部署至 `res`，macOS 位于应用包的 `Contents/Resources` 下。
 
-完整功能域、现有差异和待补项见 [Obsidian 行为对照](docs/obsidian-behavior-comparison.md)。新增“文件”和“编辑”菜单，支持打开、保存、加粗、斜体、行内代码、链接、段落复制/剪切、缩进、删除当前行及查找替换。快捷键中的 Ctrl 在 macOS 上对应 Cmd。当前查找为字面文本匹配，可区分大小写并循环查找；替换支持单次与全部，操作可撤销。菜单中的快捷键以实际平台显示为准。
+---
 
-基础字号可在“文件 → 设置”中调整（macOS 也可能显示在应用的设置菜单），快捷键 Ctrl/Cmd+,。支持 9–30 pt，默认 14 pt；即时更新正文、源码、界面和行号，标题按层级比例缩放。设置自动保存，重启后保留，并提供“恢复默认值”。
+<p align="center">MdEdit — 让文字、公式与资源留在同一份文档里。</p>
 
-编辑区已封装为可嵌入的 `MarkdownEditorWidget`（`QWidget`），可链接 `MdEdit::Editor` 复用。接口、资源初始化与示例见 [嵌入指南](docs/embedding.md)。
-
-
-## 测试与实现边界
-
-配置并构建后，使用对应测试预设执行回归，例如 `ctest --preset macos-qt-debug`；也可针对已有构建目录运行：
-
-```bash
-ctest --test-dir build-macos-qt612 --output-on-failure
-```
-
-当前 CTest 包含 architecture、table-edit、live-pdf、live-csv、typing-style、highlight、line-spacing、formula-vector、embedded-editor 和 markdown-math-smoke 共 10 项。综合示例见 [综合测试.md](综合测试.md)。
-
-资源编辑器仍在持续完善，尚未实现远程资源加载、外部文件自动监视、DXF/GLB 预览和大表格虚拟化。独立预览基础组件与应用 Live 编辑器的能力范围不同；模块边界与实现限制见 [基础版本说明](docs/resource-editor-foundation.md)。
+[badge-qt]: https://img.shields.io/badge/Qt-6.12.0-41CD52?logo=qt&logoColor=white
+[badge-cpp]: https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white
+[badge-cmake]: https://img.shields.io/badge/CMake-3.24%2B-064F8C?logo=cmake&logoColor=white
+[badge-platform]: https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-555555
+[link-issues]: https://github.com/gty5678/MdEdit/issues
