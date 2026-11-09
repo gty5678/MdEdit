@@ -8,6 +8,45 @@ int runTableEditTests();
 int runPdfTests(QApplication &app);
 
 std::optional<int> runAppTests(QApplication &app){
+    if(app.arguments().contains("--inline-boundary-test")){
+        for(const auto &entry:QList<QPair<QString,int>>{
+            {"**bold**",2},{QString::fromUtf8("**粗体**"),2},{"*italic*",1},{"***bold***",3},
+            {"`code`",1},{"``a`b``",2},{"~~gone~~",2},{"==highlight==",2},{"$x+y$",1}}){
+            const QString token=entry.first;
+            const int delimiter=entry.second;
+            for(const auto modifiers:{Qt::NoModifier,Qt::KeypadModifier})
+            for(const bool right:{true,false})
+            for(const int distance:{1,2}){
+                LiveEditor editor;
+                const QString source="a "+token+" z";
+                editor.setSource(source);
+                editor.show();editor.setFocus();app.processEvents();
+                auto caret=editor.textCursor();
+                caret.setPosition(right?2-distance:editor.toPlainText().size()-2+distance);
+                editor.setTextCursor(caret);
+                const QString preview=editor.toPlainText();
+                auto press=[&]{
+                    const auto key=right?Qt::Key_Right:Qt::Key_Left;
+                    QKeyEvent event(QEvent::KeyPress,key,modifiers);QApplication::sendEvent(&editor,&event);
+                    QKeyEvent release(QEvent::KeyRelease,key,modifiers);QApplication::sendEvent(&editor,&release);
+                    app.processEvents();
+                };
+                if(distance==2){
+                    press();
+                    if(editor.toPlainText()!=preview){qWarning()<<"Expanded before reaching boundary"<<token<<right;return 1;}
+                }
+                const int edge=right?2+delimiter:2+token.size()-delimiter;
+                press();
+                if(editor.toPlainText()!=source||editor.sourceSelection()!=qMakePair(edge,edge)){
+                    qWarning()<<"Incorrect entry"<<token<<right<<editor.toPlainText()<<editor.sourceSelection();return 2;
+                }
+                press();
+                const int next=edge+(right?1:-1);
+                if(editor.sourceSelection()!=qMakePair(next,next)||editor.markdown()!=source)return 3;
+            }
+        }
+        return 0;
+    }
     if(app.arguments().contains("--live-pdf-test"))return runPdfTests(app);
     if(app.arguments().contains("--table-edit-test"))return runTableEditTests();
     if(app.arguments().contains("--live-csv-test")){

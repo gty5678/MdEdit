@@ -1342,10 +1342,62 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
                 event->accept();return;
             }
         }
+        // Qt can tag native arrow keys with KeypadModifier (including macOS
+        // arrows). It identifies the key, not an extra navigation command.
+        const auto navigationModifiers=event->modifiers()&~Qt::KeypadModifier;
+        const bool horizontalArrow=(event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)&&
+            navigationModifiers==Qt::NoModifier&&!textCursor().hasSelection();
+        auto renderedInline=[this](int i){
+            const auto &r=regions[i];
+            return i!=active&&r.inlinePart&&r.end>r.start&&
+                source.mid(r.sourceStart,r.contentEnd-r.sourceStart)!=oldText.mid(r.start,r.end-r.start);
+        };
+        auto enterRenderedInline=[&]{
+            const int position=textCursor().position();
+            for(int i=0;i<regions.size();++i){
+                const auto &r=regions[i];
+                if(!renderedInline(i))continue;
+                const bool enterLeft=event->key()==Qt::Key_Right&&position==r.start;
+                const bool enterRight=event->key()==Qt::Key_Left&&position==r.end;
+                if(!enterLeft&&!enterRight)continue;
+                const QString raw=source.mid(r.sourceStart,r.contentEnd-r.sourceStart);
+                int contentStart=0,contentEnd=raw.size();
+                const auto spans=scanSpans(raw);
+                if(spans.size()==1&&spans.first().start==0&&spans.first().length==raw.size()){
+                    // Code and math scanners include their delimiters. Enter
+                    // their source bodies directly, including multi-backtick code.
+                    int delimiter=1;
+                    while(delimiter<raw.size()&&raw[delimiter]==raw[0])++delimiter;
+                    contentStart=delimiter;contentEnd=raw.size()-delimiter;
+                }else{
+                    // Emphasis, strikeout and highlighting styles already
+                    // describe content ranges without the surrounding markers.
+                    const auto styles=inlineEditingStyles(raw);
+                    if(!styles.isEmpty()){
+                        contentStart=raw.size();contentEnd=0;
+                        for(const auto &style:styles){
+                            contentStart=qMin(contentStart,style.start);
+                            contentEnd=qMax(contentEnd,style.start+style.length);
+                        }
+                    }
+                }
+                const int offset=enterLeft?contentStart:contentEnd;
+                // Expand at the content edge without taking a visual step,
+                // which would consume the first or last content character.
+                rebuild(i,offset);
+                QScopedValueRollback<bool> guard(movingCursor,true);
+                auto caret=textCursor();
+                caret.setPosition(regions[active].start+offset);
+                setTextCursor(caret);
+                event->accept();return true;
+            }
+            return false;
+        };
+        if(horizontalArrow&&enterRenderedInline())return;
         if(active<0)activateCaretRegion();
         if(active<0){event->ignore();return;}
         if((event->key()==Qt::Key_Left||event->key()==Qt::Key_Right)&&
-            !(event->modifiers()&~Qt::ShiftModifier)){
+            !(navigationModifiers&~Qt::ShiftModifier)){
             const auto selection=sourceSelection();const int at=selection.second;
             QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme,source);boundary.setPosition(at);
             int next=event->key()==Qt::Key_Left?boundary.toPreviousBoundary():boundary.toNextBoundary();
@@ -1415,7 +1467,12 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
             }
         }
         if(sourceExposed||deleting)rebuild(-1,0,sourcePosition(textCursor().position()));
-        else if(toPlainText()==oldText)activateCaretRegion();
+        else if(toPlainText()==oldText){
+            // Expand on arrival at the inward edge, before generic region
+            // activation can map the caret past a content character.
+            if(horizontalArrow&&enterRenderedInline())return;
+            activateCaretRegion();
+        }
         if(deleting){
             // Exposing source and restoring preview can both scroll the cursor
             // into view using temporary geometry. Keep the viewport anchored
