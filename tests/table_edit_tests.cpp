@@ -1,24 +1,52 @@
 #include "editor/markdown_editor_widget.h"
-#include "editor/tables/table_editor_dialog.h"
 #include "editor/tables/table_data.h"
 #include <iostream>
 #define CHECK(x) do{if(!(x)){std::cerr<<"Table edit failed "<<__LINE__<<": "<<#x<<'\n';return 1;}}while(false)
 static bool waitFor(const std::function<bool()> &predicate){QElapsedTimer elapsed;elapsed.start();while(!predicate()&&elapsed.elapsed()<5000){QApplication::processEvents();QThread::msleep(1);}return predicate();}
-static void click(QWidget *dialog,const char *name){dialog->findChild<QPushButton *>(name)->click();}
 int runTableEditTests(){
-    const QByteArray special="\xef\xbb\xbfname,value,notes\r\n\"a,b\",\"say \"\"hi\"\"\",\"two\nlines\"\r\n";
-    const auto decoded=mdedit::readCsv(special);CHECK(decoded.error.isEmpty());CHECK(decoded.rows[1][2]=="two\nlines");
-    CHECK(mdedit::readCsv(mdedit::writeCsv(decoded)).rows==decoded.rows);CHECK(mdedit::writeCsv(decoded).startsWith("\xef\xbb\xbf"));
-    CHECK(!mdedit::readCsv("a,\"not closed").error.isEmpty());
     const QString original="Before.\n\n| Name | Value |\n| :--- | ---: |\n| alpha | 10 |\n| beta | 20 |\n\nAfter.\n";
     MarkdownEditorWidget widget;widget.resize(900,600);widget.setMarkdown(original);widget.show();
     auto *live=static_cast<LiveEditor *>(widget.findChild<QTextBrowser *>("markdownPreview"));CHECK(live);
+    QApplication::processEvents();
+    widget.setMarkdown("Before.\n\nAfter.");
+    QTextCursor insertion(live->document()->lastBlock());
+    insertion.movePosition(QTextCursor::Right,QTextCursor::MoveAnchor,3);
+    const QPoint insertionPoint=live->cursorRect(insertion).center();
+    QContextMenuEvent insertContext(QContextMenuEvent::Mouse,insertionPoint,live->viewport()->mapToGlobal(insertionPoint));
+    QApplication::sendEvent(live->viewport(),&insertContext);
+    auto *insertMenu=live->findChild<QMenu *>("editorContextMenu");CHECK(insertMenu);
+    for(auto *action:insertMenu->actions()){
+        const auto label=action->text().remove('&').section('\t',0,0).trimmed();
+        CHECK(!label.startsWith("Undo"));CHECK(!label.startsWith("Redo"));CHECK(!label.startsWith("Select All"));
+        CHECK(!label.contains("撤销"));CHECK(!label.contains("重做"));CHECK(!label.contains("全选"));
+    }
+    auto *insertAction=insertMenu->findChild<QAction *>("insertTable");CHECK(insertAction);CHECK(insertAction->isEnabled());
+    insertAction->trigger();insertMenu->close();
+    QTextTable *insertedTable=nullptr;
+    for(auto block=live->document()->begin();block.isValid();block=block.next())
+        if(auto *table=QTextCursor(block).currentTable()){insertedTable=table;break;}
+    CHECK(insertedTable);CHECK(insertedTable->rows()==2);CHECK(insertedTable->columns()==2);
+    for(int row=0;row<2;++row)for(int column=0;column<2;++column){
+        auto cell=insertedTable->cellAt(row,column);auto content=cell.firstCursorPosition();
+        content.setPosition(cell.lastPosition(),QTextCursor::KeepAnchor);CHECK(content.selectedText().trimmed().isEmpty());
+    }
+    CHECK(widget.markdown()=="Before.\n\n|  |  |\n| --- | --- |\n|  |  |\n\nAfter.");
+    widget.document()->undo();widget.render();CHECK(widget.markdown()=="Before.\n\nAfter.");
+    for(const auto &sample:QList<QPair<QString,int>>{{"",0},{"Text",2},{"Before.\n\nAfter.",8},{"Before.\n",8}}){
+        widget.setMarkdown(sample.first);
+        const int start=sample.second>0?sample.first.lastIndexOf('\n',sample.second-1)+1:0;
+        const int end=start<sample.first.size()&&sample.first.at(start)=='\n'?start+1:start;
+        QString expected=sample.first;expected.replace(start,end-start,"|  |  |\n| --- | --- |\n|  |  |\n\n");
+        live->insertTableRequested(sample.second);CHECK(widget.markdown()==expected);
+        widget.document()->undo();widget.render();CHECK(widget.markdown()==sample.first);
+    }
+    widget.setMarkdown(original);
     QApplication::processEvents();QTextCursor cell;
     for(auto block=live->document()->begin();block.isValid();block=block.next())if(QTextCursor(block).currentTable()){cell=QTextCursor(block);break;}
     CHECK(!cell.isNull());const QPoint tablePoint=live->cursorRect(cell).center();
     QMouseEvent doubleClick(QEvent::MouseButtonDblClick,tablePoint,live->viewport()->mapToGlobal(tablePoint),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
     QApplication::sendEvent(live->viewport(),&doubleClick);
-    CHECK(!live->findChild<mdedit::TableEditorDialog *>());
+    CHECK(!live->findChild<QDialog *>());
     CHECK(live->textCursor().currentTable());
     auto *inlineTable=live->textCursor().currentTable();
     live->setTextCursor(inlineTable->cellAt(1,0).lastCursorPosition());
@@ -48,6 +76,49 @@ int runTableEditTests(){
     QKeyEvent paste(QEvent::KeyPress,Qt::Key_V,Qt::ControlModifier);QApplication::sendEvent(live,&paste);
     CHECK(widget.markdown().contains("<br>"));CHECK(live->textCursor().currentTable());
     widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    // Enter inserts a soft break; at the end of the final row it appends a row.
+    auto findTable=[&]()->QTextTable *{
+        for(auto block=live->document()->begin();block.isValid();block=block.next())
+            if(auto *table=QTextCursor(block).currentTable())return table;
+        return nullptr;
+    };
+    // Removing the blank line before a table must not expose the table source.
+    for(const QString &prefix:QStringList{"Before.","**Before.**"}){
+        widget.setMarkdown(prefix+"\n\n| Name | Value |\n| --- | --- |\n| alpha | 10 |\n");
+        QTextCursor above(live->document()->begin());
+        above.movePosition(QTextCursor::NextBlock);
+        live->setTextCursor(above);
+        QKeyEvent backspace(QEvent::KeyPress,Qt::Key_Backspace,Qt::NoModifier);
+        QApplication::sendEvent(live,&backspace);
+        CHECK(findTable());
+        CHECK(!live->toPlainText().contains("| --- |"));
+        CHECK(widget.markdown()==prefix+"\n| Name | Value |\n| --- | --- |\n| alpha | 10 |\n");
+        QApplication::sendEvent(live,&backspace);
+        CHECK(findTable());
+        CHECK(!live->toPlainText().contains("| --- |"));
+    }
+    widget.setMarkdown(original);
+    inlineTable=findTable();CHECK(inlineTable);
+    live->setTextCursor(inlineTable->cellAt(1,0).lastCursorPosition());
+    QKeyEvent enterCell(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier);
+    QApplication::sendEvent(live,&enterCell);
+    CHECK(live->textCursor().currentTable()->rows()==3);
+    CHECK(live->textCursor().block().text().contains(QChar::LineSeparator));
+    CHECK(widget.markdown().contains("<br>"));
+    QKeyEvent afterBreak(QEvent::KeyPress,0,Qt::NoModifier,"next");QApplication::sendEvent(live,&afterBreak);
+    CHECK(widget.markdown().contains("alpha<br>next"));
+    widget.setMarkdown(original);inlineTable=findTable();CHECK(inlineTable);
+    live->setTextCursor(inlineTable->cellAt(2,1).lastCursorPosition());
+    QApplication::sendEvent(live,&enterCell);
+    CHECK(live->textCursor().currentTable()->rows()==4);
+    CHECK(live->textCursor().currentTable()->cellAt(live->textCursor()).row()==3);
+    CHECK(live->textCursor().currentTable()->cellAt(live->textCursor()).column()==1);
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    inlineTable=findTable();CHECK(inlineTable);
+    live->setTextCursor(inlineTable->cellAt(2,0).lastCursorPosition());
+    QKeyEvent shiftEnter(QEvent::KeyPress,Qt::Key_Return,Qt::ShiftModifier);QApplication::sendEvent(live,&shiftEnter);
+    CHECK(live->textCursor().currentTable()->rows()==3);
+    CHECK(widget.markdown().contains("beta<br>"));
     const QString formulaSource="Before.\n\n| Formula | Other |\n| --- | --- |\n| $x^2$ | **keep** |\n\nAfter.\n";
     widget.setMarkdown(formulaSource);
     for(auto block=live->document()->begin();block.isValid();block=block.next())if(QTextCursor(block).currentTable()){inlineTable=QTextCursor(block).currentTable();break;}
@@ -115,20 +186,6 @@ int runTableEditTests(){
     CHECK(!live->textCursor().currentTable());CHECK(widget.markdown()==original);
     live->restoreSourceSelection(original.indexOf("| Name"),original.indexOf("| Name"));CHECK(live->textCursor().currentTable());
     QKeyEvent up(QEvent::KeyPress,Qt::Key_Up,Qt::NoModifier);QApplication::sendEvent(live,&up);CHECK(!live->textCursor().currentTable());CHECK(widget.markdown()==original);
-    CHECK(live->editTableAt(original.indexOf("| Name")));
-    auto *dialog=live->findChild<mdedit::TableEditorDialog *>();CHECK(dialog);
-    auto *grid=dialog->findChild<QTableWidget *>("tableCells");CHECK(grid->rowCount()==3&&grid->columnCount()==2);
-    grid->setCurrentCell(1,0);click(dialog,"insertRowAfter");CHECK(grid->rowCount()==4);
-    grid->setItem(2,0,new QTableWidgetItem("new | cell"));grid->setItem(2,1,new QTableWidgetItem("30"));
-    click(dialog,"moveRowUp");CHECK(grid->item(1,0)->text()=="new | cell");
-    click(dialog,"insertColumnAfter");CHECK(grid->columnCount()==3);
-    grid->setItem(1,1,new QTableWidgetItem("middle"));click(dialog,"moveColumnRight");CHECK(grid->item(1,2)->text()=="middle");
-    click(dialog,"removeColumn");CHECK(grid->columnCount()==2);
-    grid->setCurrentCell(3,0);click(dialog,"removeRow");CHECK(grid->rowCount()==3);
-    click(dialog,"applyTable");QApplication::processEvents();
-    CHECK(widget.markdown().startsWith("Before.\n\n"));CHECK(widget.markdown().endsWith("\n\nAfter.\n"));
-    CHECK(widget.markdown().contains("new \\| cell"));CHECK(widget.markdown().contains(":---"));CHECK(widget.document()->isModified());
-    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
     CHECK(live->moveTableBlockAt(original.indexOf("| Name"),-1));CHECK(widget.markdown().startsWith("| Name"));
     widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
     CHECK(live->moveTableBlockAt(original.indexOf("| Name"),1));CHECK(widget.markdown().indexOf("After.")<widget.markdown().indexOf("| Name"));
@@ -236,6 +293,18 @@ int runTableEditTests(){
     CHECK(rectangle(2,1,1,0));CHECK(live->clipboardNativeCell(true));
     CHECK(QApplication::clipboard()->text()=="alpha\t10\nbeta\t20");
     CHECK(geometry()->rows()==3&&geometry()->columns()==2);
+    widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    // Selecting every cell deletes the table block, including in reverse drags.
+    for(int key:{Qt::Key_Delete,Qt::Key_Backspace}){
+        CHECK(rectangle(2,1,0,0));
+        QKeyEvent removeTable(QEvent::KeyPress,key,Qt::NoModifier);QApplication::sendEvent(live,&removeTable);
+        CHECK(!widget.markdown().contains("|"));
+        CHECK(widget.markdown().contains("Before")&&widget.markdown().contains("After"));
+        widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
+    }
+    CHECK(rectangle(0,0,2,1));CHECK(live->clipboardNativeCell(true));
+    CHECK(QApplication::clipboard()->text()=="Name\tValue\nalpha\t10\nbeta\t20");
+    CHECK(!widget.markdown().contains("|"));
     widget.document()->undo();widget.render();CHECK(widget.markdown()==original);
     // Rectangles can be projected onto either axis for grouped movement.
     CHECK(rectangle(1,0,2,1));
@@ -382,22 +451,49 @@ int runTableEditTests(){
     QFile file(path);CHECK(file.open(QIODevice::WriteOnly));CHECK(file.write(bytes)==bytes.size());file.close();
     const QString ref="Before.\n\n![Full CSV](full.csv)\n\nAfter.\n";
     widget.setBaseUrl(QUrl::fromLocalFile(dir.path()+"/"));widget.setMarkdown(ref);
-    CHECK(live->editTableAt(ref.indexOf("![")));dialog=live->findChild<mdedit::TableEditorDialog *>();CHECK(dialog);
-    grid=dialog->findChild<QTableWidget *>("tableCells");CHECK(waitFor([&]{return grid->rowCount()==81;}));
-    grid->setItem(80,1,new QTableWidgetItem("changed, \"last\"\nline"));grid->setCurrentCell(80,1);click(dialog,"insertRowAfter");
-    grid->setItem(81,0,new QTableWidgetItem("added"));grid->setItem(81,1,new QTableWidgetItem("end"));
-    bool saved=false;QObject::connect(dialog,&mdedit::TableEditorDialog::csvSaved,&widget,[&]{saved=true;});click(dialog,"applyTable");CHECK(waitFor([&]{return saved;}));
-    CHECK(file.open(QIODevice::ReadOnly));const QByteArray changed=file.readAll();file.close();const auto complete=mdedit::readCsv(changed);
-    CHECK(complete.rows.size()==82);CHECK(complete.rows[80][1]=="changed, \"last\"\nline");CHECK(complete.rows.last()[0]=="added");
+    QTextCursor csvCell;
+    CHECK(waitFor([&]{
+        for(auto block=live->document()->begin();block.isValid();block=block.next())
+            for(auto it=block.begin();!it.atEnd();++it){
+                const auto format=it.fragment().charFormat();
+                if(format.isImageFormat()&&QUrl(format.toImageFormat().name()).scheme()=="csv-ready"){
+                    csvCell=QTextCursor(live->document());csvCell.setPosition(it.fragment().position());return true;
+                }
+            }
+        return false;
+    }));
+    const QPoint csvPoint=live->cursorRect(csvCell).center();
+    QMouseEvent csvDoubleClick(QEvent::MouseButtonDblClick,csvPoint,live->viewport()->mapToGlobal(csvPoint),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+    QApplication::sendEvent(live->viewport(),&csvDoubleClick);
+    CHECK(!live->findChild<QDialog *>());
+    QContextMenuEvent csvMenuEvent(QContextMenuEvent::Mouse,csvPoint,live->viewport()->mapToGlobal(csvPoint));
+    QApplication::sendEvent(live->viewport(),&csvMenuEvent);
+    auto *csvMenu=live->findChild<QMenu *>("tableContextMenu");CHECK(csvMenu);
+    for(auto *action:csvMenu->actions())CHECK(!action->text().contains("编辑 CSV"));
+    csvMenu->close();
+    CHECK(file.open(QIODevice::ReadOnly));CHECK(file.readAll()==bytes);file.close();
     CHECK(widget.markdown()==ref);CHECK(!widget.document()->isModified());
-    QApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-    CHECK(live->editTableAt(ref.indexOf("![")));dialog=live->findChild<mdedit::TableEditorDialog *>();CHECK(dialog);
-    grid=dialog->findChild<QTableWidget *>("tableCells");CHECK(waitFor([&]{return grid->rowCount()==82;}));
-    CHECK(file.open(QIODevice::Append));file.write("external,new\n");file.close();
-    grid->setItem(0,0,new QTableWidgetItem("DO NOT OVERWRITE"));click(dialog,"applyTable");
-    CHECK(waitFor([&]{return dialog->isEnabled();}));CHECK(dialog->isVisible());
-    CHECK(file.open(QIODevice::ReadOnly));const auto external=file.readAll();file.close();CHECK(external==changed+"external,new\n");dialog->reject();
     CHECK(live->moveTableBlockAt(ref.indexOf("!["),1));CHECK(widget.markdown().indexOf("After.")<widget.markdown().indexOf("!["));
     widget.document()->undo();widget.render();CHECK(widget.markdown()==ref);
+    // Starting a grid drag after clicking a formatted cell must not scroll
+    // through the temporary document-start caret used to restore its preview.
+    const QString scrollSource=QString("Paragraph above.\n\n").repeated(60)+
+        "| Name | Value |\n| --- | --- |\n| **alpha** | 10 |\n| beta | 20 |\n\n"+
+        QString("Paragraph below.\n\n").repeated(60);
+    widget.setMarkdown(scrollSource);QApplication::processEvents();
+    inlineTable=findTable();CHECK(inlineTable);
+    live->setTextCursor(inlineTable->cellAt(1,0).firstCursorPosition());
+    live->ensureCursorVisible();QApplication::processEvents();
+    const auto from=cellPoint(1,0),to=cellPoint(2,1);
+    sendMouse(QEvent::MouseButtonPress,from,Qt::LeftButton,Qt::LeftButton);
+    const int scrollBeforeDrag=live->verticalScrollBar()->value();CHECK(scrollBeforeDrag>0);
+    sendMouse(QEvent::MouseMove,to,Qt::NoButton,Qt::LeftButton);
+    CHECK(live->verticalScrollBar()->value()==scrollBeforeDrag);
+    sendMouse(QEvent::MouseButtonRelease,to,Qt::LeftButton,Qt::NoButton);
+    QApplication::processEvents();
+    CHECK(live->verticalScrollBar()->value()==scrollBeforeDrag);
+    CHECK(live->clipboardNativeCell(false));
+    CHECK(QApplication::clipboard()->text()=="**alpha**\t10\nbeta\t20");
+    CHECK(widget.markdown()==scrollSource);
     return 0;
 }

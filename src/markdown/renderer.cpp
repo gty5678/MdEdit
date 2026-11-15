@@ -7,6 +7,25 @@
 #include <memory>
 #include <QPicture>
 
+// Color source syntax without turning editable text into clickable anchors.
+QList<InlineEditingStyle> linkEditingStyles(const QString &source){
+    QList<InlineEditingStyle> styles;
+    const auto spans=scanSpans(source);
+    static const QRegularExpression links(R"((?<![!\\])\[(?:\\.|[^\]\n])+\]\((?:\\.|[^()\n]|\([^()\n]*\))*\)|(?<![!\\])\[[^\]\n]+\]\[[^\]\n]*\]|<(?:(?:https?://|mailto:)[^<>\s]+)>|https?://[^\s<>\[\]]+)");
+    auto matches=links.globalMatch(source);
+    while(matches.hasNext()){
+        const auto match=matches.next();
+        if(escaped(source,match.capturedStart()))continue;
+        const bool protectedText=std::any_of(spans.cbegin(),spans.cend(),[&](const Span &span){
+            return match.capturedStart()<span.start+span.length&&match.capturedEnd()>span.start;
+        });
+        if(protectedText)continue;
+        QTextCharFormat format;format.setForeground(QColor("#2468b4"));
+        styles.append({int(match.capturedStart()),int(match.capturedLength()),format});
+    }
+    return styles;
+}
+
 // Editing deliberately accepts unfinished delimiters, bounded by a source line.
 // Source positions and visible delimiters stay intact; only formats change.
 QList<InlineEditingStyle> inlineEditingStyles(const QString &source){
@@ -63,6 +82,7 @@ QList<InlineEditingStyle> inlineEditingStyles(const QString &source){
         i+=run;
     }
     finish(source.size());
+    styles.append(linkEditingStyles(source));
     return styles;
 }
 
@@ -135,6 +155,60 @@ static QString protectMath(const QString &source, QList<QPair<QString,QString>> 
     return result+source.mid(end);
 }
 
+// Adapt only parser input; the saved source and cursor offsets stay untouched.
+QString markdownWithoutSetext(const QString &source){
+    const auto spans=scanSpans(source);
+    static const QRegularExpression underline(R"(^((?: {0,3}>[ \t]?)* {0,3})(-+|=+)[ \t]*$)");
+    QStringList lines=source.split('\n');
+    int offset=0;
+    for(auto &line:lines){
+        const int length=line.size();
+        const auto match=underline.match(line);
+        if(match.hasMatch()){
+            const int marker=offset+match.capturedStart(2);
+            const bool protectedText=std::any_of(spans.cbegin(),spans.cend(),[&](const Span &span){
+                return marker>=span.start&&marker<span.start+span.length;
+            });
+            if(!protectedText){
+                const QString run=match.captured(2);
+                // Spaced dashes remain a thematic break, never a heading.
+                if(run[0]=='-'&&run.size()>=3)
+                    line.replace(match.capturedStart(2),run.size(),"- - -");
+                else line.insert(match.capturedStart(2),'\\');
+            }
+        }
+        offset+=length+1;
+    }
+    return lines.join('\n');
+}
+
+// Convert wiki links before Qt parses Markdown; code and math remain literal.
+static QString expandWikiLinks(const QString &source){
+    const auto spans=scanSpans(source);
+    static const QRegularExpression pattern(R"((?<![!\\])\[\[([^\[\]\n]+)\]\])");
+    QString result=source;
+    auto matches=pattern.globalMatch(source);
+    QList<QRegularExpressionMatch> links;
+    while(matches.hasNext())links.append(matches.next());
+    for(auto it=links.crbegin();it!=links.crend();++it){
+        const auto &m=*it;
+        if(escaped(source,m.capturedStart()))continue;
+        if(std::any_of(spans.cbegin(),spans.cend(),[&](const Span &span){
+            return m.capturedStart()<span.start+span.length&&m.capturedEnd()>span.start;
+        }))continue;
+        const QString body=m.captured(1);
+        const int separator=body.indexOf('|');
+        const QString target=(separator<0?body:body.left(separator)).trimmed();
+        if(target.isEmpty())continue;
+        QString label=separator<0?target:body.mid(separator+1).trimmed();
+        if(label.isEmpty())label=target;
+        for(const QChar ch:QString("\\`*_{}[]<>"))label.replace(QString(ch),"\\"+QString(ch));
+        const QString href="mdedit-wiki:/"+QString::fromLatin1(QUrl::toPercentEncoding(target));
+        result.replace(m.capturedStart(),m.capturedLength(),"["+label+"]("+href+")");
+    }
+    return result;
+}
+
 static QString preserveLineBreaks(const QString &source){
     const auto spans=scanSpans(source);
     auto span=spans.cbegin();
@@ -165,6 +239,34 @@ QTextCharFormat headingCharacters(int level,const QFont &base){
     return characters;
 }
 
+// Qt's Markdown importer drops the enclosing anchor on linked images.
+void restoreImageLinks(QTextDocument *document,const QString &source){
+    static const QRegularExpression linked(R"rx(\[!\[([^\]\n]*)\]\(\s*(<[^>\n]+>|[^\s\n]+?)(?:\s+"[^"\n]*")?\s*\)\]\(\s*(<[^>\n]+>|(?:[^\s()\n]|\([^()\n]*\))+)(?:\s+"[^"\n]*")?\s*\))rx");
+    auto matches=linked.globalMatch(source);
+    const auto spans=scanSpans(source);
+    int after=0;
+    while(matches.hasNext()){
+        const auto match=matches.next();
+        if(escaped(source,match.capturedStart()))continue;
+        bool code=false;
+        for(const auto &span:spans)if(span.kind==SpanKind::Code&&match.capturedStart()>=span.start&&match.capturedStart()<span.start+span.length){code=true;break;}
+        if(code)continue;
+        auto unwrap=[](QString value){return value.startsWith('<')?value.mid(1,value.size()-2):value;};
+        for(auto block=document->begin();block.isValid();block=block.next()){
+            bool found=false;
+            for(auto it=block.begin();!it.atEnd();++it){
+                const auto fragment=it.fragment();auto format=fragment.charFormat();
+                if(fragment.position()<after||!format.isImageFormat())continue;
+                if(QUrl(format.toImageFormat().name())!=QUrl(unwrap(match.captured(2)))||format.stringProperty(QTextFormat::ImageAltText)!=match.captured(1))continue;
+                format.setAnchor(true);format.setAnchorHref(unwrap(match.captured(3)));
+                QTextCursor cursor(document);cursor.setPosition(fragment.position());cursor.setPosition(fragment.position()+fragment.length(),QTextCursor::KeepAnchor);cursor.setCharFormat(format);
+                after=fragment.position()+fragment.length();found=true;break;
+            }
+            if(found)break;
+        }
+    }
+}
+
 int renderMarkdown(QTextDocument *document,const QString &source,QStringList &errors,bool live){
     document->setIndentWidth(24);
     auto *layout=document->documentLayout();
@@ -184,7 +286,8 @@ int renderMarkdown(QTextDocument *document,const QString &source,QStringList &er
         marked.replace(ranges[i].first,2,begin);
         markers.append({begin,end});
     }
-    document->setMarkdown(preserveLineBreaks(protectMath(marked,math)));
+    document->setMarkdown(preserveLineBreaks(protectMath(markdownWithoutSetext(expandWikiLinks(marked)),math)));
+    restoreImageLinks(document,source);
     for(const auto &marker:markers){
         auto begin=document->find(marker.first),end=document->find(marker.second);
         if(begin.isNull()||end.isNull())continue;

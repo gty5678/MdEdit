@@ -1,7 +1,21 @@
 #include "window.h"
 
+namespace {
+bool writeDocument(const QString &path,const QByteArray &bytes){
+    QSaveFile file(path);
+    return file.open(QIODevice::WriteOnly)&&file.write(bytes)==bytes.size()&&file.commit();
+}
+}
+
+
 Window::Window(){
         resize(980,780);updateTitle();
+        connect(editingSurface,&MarkdownEditorWidget::fileLinkActivated,this,[this](const QString &file){
+            if(!QFileInfo(file).isFile()){
+                statusBar()->show();statusBar()->showMessage("链接文件不存在："+file,5000);return;
+            }
+            load(file);
+        });
         auto *welcome=new QWidget;
         auto *layout=new QVBoxLayout(welcome);
         auto *open=new QPushButton("打开");
@@ -36,7 +50,9 @@ Window::Window(){
         autosave.setSingleShot(true);autosave.setInterval(600);
         statsTimer.setSingleShot(true);statsTimer.setInterval(250);
         connect(&statsTimer,&QTimer::timeout,this,[this]{updateDocumentStats();});
-        connect(editingSurface,&MarkdownEditorWidget::textChanged,this,[this]{statsTimer.start();if(!path.isEmpty())autosave.start();});
+        connect(editingSurface,&MarkdownEditorWidget::textChanged,this,[this]{statsTimer.start();if(!loading&&documentOpen){
+            if(!path.isEmpty())autosave.start();
+        }});
         connect(editingSurface,&MarkdownEditorWidget::modificationChanged,this,[this]{updateTitle();});
         connect(&autosave,&QTimer::timeout,this,[this]{save();});
         connect(open,&QPushButton::clicked,this,[this]{
@@ -51,12 +67,17 @@ Window::Window(){
             dialog->open();
         });
         auto *fileMenu=menuBar()->addMenu("文件");
+        auto *newAction=fileMenu->addAction("新建");newAction->setShortcut(QKeySequence::New);
+        connect(newAction,&QAction::triggered,this,[this]{newDocument();});
         auto *openAction=fileMenu->addAction("打开…");openAction->setShortcut(QKeySequence::Open);
         connect(openAction,&QAction::triggered,open,&QPushButton::click);
         // The window action also works after leaving the welcome screen.
         openShortcut->setEnabled(false);
         auto *saveAction=fileMenu->addAction("保存");saveAction->setShortcut(QKeySequence::Save);
         connect(saveAction,&QAction::triggered,this,[this]{save();});
+        auto *saveAsAction=fileMenu->addAction("另存为…");saveAsAction->setShortcut(QKeySequence::SaveAs);
+        connect(saveAsAction,&QAction::triggered,this,[this]{chooseSaveAs();});
+        recentMenu=fileMenu->addMenu("最近文件");refreshRecentFiles();
         auto *editMenu=menuBar()->addMenu("编辑");
         for(auto *action:editingSurface->editingActions())editMenu->addAction(action);
         auto *viewMenu=menuBar()->addMenu("视图");
@@ -120,7 +141,7 @@ void Window::updateDocumentStats(){
 
 void Window::updateTitle(){
         const bool modified=editingSurface->document()->isModified();
-        if(path.isEmpty()){setWindowTitle("MdEdit");return;}
+        if(path.isEmpty()){setWindowTitle(documentOpen?QString("未命名")+(modified?" *":"")+" — MdEdit":"MdEdit");return;}
         const QString name=QFileInfo(path).fileName();
         setWindowTitle(name+(modified?" *":"")+" — MdEdit");
     }
@@ -128,13 +149,14 @@ void Window::updateTitle(){
 void Window::render(){editingSurface->render();}
 
 bool Window::save(){
-        if(path.isEmpty()||!editingSurface->document()->isModified())return true;
-        QSaveFile file(path);
+        if(path.isEmpty()){
+            if(documentOpen){chooseSaveAs();return false;}
+            return true;
+        }
+        if(!editingSurface->document()->isModified())return true;
         const auto bytes=editingSurface->markdown().toUtf8();
-        if(!file.open(QIODevice::WriteOnly)||file.write(bytes)!=bytes.size()||!file.commit()){
-            statusBar()->showMessage("自动保存失败："+file.errorString());
-            statusBar()->show();
-            return false;
+        if(!writeDocument(path,bytes)){
+            statusBar()->showMessage("自动保存失败，请检查文件权限和磁盘空间");statusBar()->show();return false;
         }
         editingSurface->document()->setModified(false);
         statusBar()->clearMessage();
@@ -142,11 +164,12 @@ bool Window::save(){
     }
 
 void Window::load(const QString &file){
-        if(!save())return;
+        prepareSwitch([this,file]{
         QFile f(file);
         if(!f.open(QIODevice::ReadOnly)){QMessageBox::warning(this,"打开失败",f.errorString());return;}
         const auto bytes=f.readAll();
         if(f.error()!=QFileDevice::NoError){QMessageBox::warning(this,"打开失败",f.errorString());return;}
+        loading=true;documentOpen=true;
         path=QFileInfo(file).absoluteFilePath();
         editingSurface->setBaseUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()+"/"));
         editingSurface->setMarkdown(QString::fromUtf8(bytes));
@@ -157,13 +180,88 @@ void Window::load(const QString &file){
         updateDocumentStats();
         statusBar()->show();
         editingSurface->setFocus();
-        updateTitle();
+        updateTitle();loading=false;rememberFile();
+        });
     }
 
-void Window::closeEvent(QCloseEvent *e){
-        if(save())e->accept();
-        else{
-            e->ignore();
-            QMessageBox::warning(this,"无法关闭文档",statusBar()->currentMessage());
-        }
+void Window::closeEvent(QCloseEvent *event){
+    if(path.isEmpty()&&documentOpen&&editingSurface->document()->isModified()){
+        event->ignore();prepareSwitch([this]{close();});return;
     }
+    if(path.isEmpty()||save()){event->accept();return;}
+    event->ignore();
+    QMessageBox::warning(this,"无法关闭文档",statusBar()->currentMessage());
+}
+
+void Window::prepareSwitch(std::function<void()> next){
+    if(!editingSurface->document()->isModified()){next();return;}
+    if(!path.isEmpty()){if(save())next();return;}
+    auto *dialog=new QMessageBox(QMessageBox::Question,"保存未命名文档？","当前文档有未保存的修改。",
+        QMessageBox::Save|QMessageBox::Discard|QMessageBox::Cancel,this);
+    dialog->setObjectName("unsavedDocumentDialog");dialog->setAttribute(Qt::WA_DeleteOnClose);dialog->setDefaultButton(QMessageBox::Save);
+    connect(dialog,&QMessageBox::finished,this,[this,next](int result){
+        if(result==QMessageBox::Save)chooseSaveAs(next);
+        else if(result==QMessageBox::Discard){
+            editingSurface->document()->setModified(false);next();
+        }
+    });dialog->open();
+}
+
+void Window::newDocument(){
+    prepareSwitch([this]{
+        autosave.stop();loading=true;path.clear();documentOpen=true;
+        editingSurface->setBaseUrl({});editingSurface->setMarkdown({});loading=false;
+        screens->setCurrentWidget(editingSurface);statusBar()->show();
+        updateDocumentStats();updateTitle();editingSurface->setFocus();
+    });
+}
+
+void Window::chooseSaveAs(std::function<void()> next){
+    if(!documentOpen)return;
+    if(auto *existing=findChild<QFileDialog *>("saveAsDialog")){existing->raise();return;}
+    auto *dialog=new QFileDialog(this,"另存为",path.isEmpty()?QDir::homePath()+"/未命名.md":path,"Markdown (*.md *.markdown);;所有文件 (*)");
+    dialog->setObjectName("saveAsDialog");dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setAcceptMode(QFileDialog::AcceptSave);dialog->setDefaultSuffix("md");
+#ifdef Q_OS_MACOS
+    dialog->setOption(QFileDialog::DontUseNativeDialog);
+#endif
+    connect(dialog,&QFileDialog::fileSelected,this,[this,next](const QString &file){if(saveAs(file)&&next)next();});
+    dialog->open();
+}
+
+bool Window::saveAs(const QString &target){
+    if(!documentOpen||target.isEmpty())return false;
+    const QString destination=QFileInfo(target).absoluteFilePath();
+    if(destination==path||(!QFileInfo(target).canonicalFilePath().isEmpty()&&QFileInfo(target).canonicalFilePath()==QFileInfo(path).canonicalFilePath()))return save();
+    const auto bytes=editingSurface->markdown().toUtf8();
+    if(!writeDocument(destination,bytes)){statusBar()->showMessage("另存为失败，请检查文件权限和磁盘空间");return false;}
+    path=destination;autosave.stop();
+    editingSurface->setBaseUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()+"/"));
+    editingSurface->document()->setModified(false);rememberFile();updateTitle();
+    statusBar()->showMessage("已保存："+path,5000);return true;
+}
+
+void Window::rememberFile(){
+    if(path.isEmpty())return;
+    QSettings settings;auto recent=settings.value("files/recent").toStringList();
+    recent.removeAll(path);recent.prepend(path);while(recent.size()>10)recent.removeLast();
+    settings.setValue("files/recent",recent);refreshRecentFiles();
+}
+void Window::refreshRecentFiles(){
+    recentMenu->clear();const auto recent=QSettings().value("files/recent").toStringList();
+    for(const auto &file:recent){
+        auto *action=recentMenu->addAction(file);action->setToolTip(file);
+        connect(action,&QAction::triggered,this,[this,file]{
+            if(!QFile::exists(file)){
+                auto entries=QSettings().value("files/recent").toStringList();entries.removeAll(file);QSettings().setValue("files/recent",entries);
+                refreshRecentFiles();statusBar()->show();statusBar()->showMessage("文件不存在，已从最近文件中移除："+file);return;
+            }
+            load(file);
+        });
+    }
+    if(recent.isEmpty()){auto *empty=recentMenu->addAction("暂无最近文件");empty->setEnabled(false);}
+    else{
+        recentMenu->addSeparator();auto *clear=recentMenu->addAction("清空最近文件");
+        connect(clear,&QAction::triggered,this,[this]{QSettings().remove("files/recent");refreshRecentFiles();});
+    }
+}

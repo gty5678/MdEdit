@@ -1,6 +1,7 @@
 #pragma once
 #include <QtCore>
 #include <QtGui>
+#include <QNetworkAccessManager>
 #include <optional>
 namespace mdedit {
 struct ResourceSnapshot {
@@ -23,6 +24,7 @@ public:
 class ResourceManager : public QObject {
     Q_OBJECT
     QThreadPool pool;
+    QNetworkAccessManager network;
     QCache<QString,ResourceSnapshot> cache{64*1024}; // KiB
     QSet<QString> pending;
     quint64 revision=0;

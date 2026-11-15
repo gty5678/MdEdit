@@ -1,10 +1,28 @@
 #include "markdown_preview_widget.h"
+#include "../../markdown/renderer.h"
 #include "../render/renderer_registry.h"
 namespace mdedit {
 namespace {
 class PreviewTextDocument final:public QTextDocument {
 protected:
-    QVariant loadResource(int,const QUrl &) override {return {};}
+    QVariant loadResource(int type,const QUrl &url) override {
+        if(type!=QTextDocument::ImageResource)return {};
+        const auto *data=resources.lookup(resources.request(baseUrl().resolved(url)));
+        return data&&!data->image.isNull()?QVariant(data->image):QVariant();
+    }
+public:
+    ResourceManager &resources;
+    explicit PreviewTextDocument(ResourceManager &manager):resources(manager){}
+    void refreshImages(){
+        for(auto block=begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
+            const auto format=it.fragment().charFormat();
+            if(!format.isImageFormat())continue;
+            const QUrl url(format.toImageFormat().name());
+            const auto *data=resources.lookup(resources.request(baseUrl().resolved(url)));
+            if(data&&!data->image.isNull())addResource(ImageResource,url,data->image);
+        }
+        markContentsDirty(0,characterCount());
+    }
 };
 }
 
@@ -19,12 +37,12 @@ void MarkdownPreviewWidget::setSource(const QString &text,const QUrl &baseUrl) {
     for(const auto &block:MarkdownParser::parse(source)) {
         Entry entry;entry.block=block;
         if(!block.resource){
-            entry.text=std::make_unique<PreviewTextDocument>();
+            entry.text=std::make_unique<PreviewTextDocument>(resources);
             entry.text->setDefaultFont(font());entry.text->setDocumentMargin(0);
             QString fragment=source.mid(block.source.begin,block.source.end-block.source.begin);
-            // The resource pipeline owns external I/O; inline images retain readable alt text.
-            fragment.replace(QRegularExpression(R"(!\[([^\]]*)\]\([^)]*\))"),QStringLiteral("[图片：\\1]"));
-            entry.text->setMarkdown(fragment,QTextDocument::MarkdownDialectGitHub);
+            entry.text->setBaseUrl(base);
+            entry.text->setMarkdown(markdownWithoutSetext(fragment),QTextDocument::MarkdownDialectGitHub);
+            restoreImageLinks(entry.text.get(),fragment);
         }
         entries.push_back(std::move(entry));
     }
@@ -37,7 +55,7 @@ void MarkdownPreviewWidget::relayout() {
     qreal y=24;const qreal width=qMax(80,viewport()->width()-48);
     for(auto &entry:entries){
         entry.top=y;
-        if(entry.text){entry.text->setTextWidth(width);entry.height=entry.text->size().height();}
+        if(entry.text){static_cast<PreviewTextDocument *>(entry.text.get())->refreshImages();entry.text->setTextWidth(width);entry.height=entry.text->size().height();}
         else {
             const auto &ref=*entry.block.resource;
             if(!ResourceResolver::isPreviewResource(ResourceResolver::resolve(ref.uri,base))){
@@ -60,7 +78,7 @@ void MarkdownPreviewWidget::relayout() {
     verticalScrollBar()->setRange(0,qMax(0,int(y+24-viewport()->height())));viewport()->update();
 }
 void MarkdownPreviewWidget::refreshAppearance(){for(auto &entry:entries)if(entry.text)entry.text->setDefaultFont(font());relayout();}
-void MarkdownPreviewWidget::refreshResources(){resources.clear();viewport()->update();}
+void MarkdownPreviewWidget::refreshResources(){resources.clear();relayout();}
 void MarkdownPreviewWidget::resizeEvent(QResizeEvent *event){QAbstractScrollArea::resizeEvent(event);relayout();}
 void MarkdownPreviewWidget::paintEvent(QPaintEvent *) {
     QPainter painter(viewport());painter.fillRect(viewport()->rect(),Qt::white);
@@ -103,6 +121,13 @@ void MarkdownPreviewWidget::paintEvent(QPaintEvent *) {
 void MarkdownPreviewWidget::mousePressEvent(QMouseEvent *event){
     const qreal y=event->position().y()+verticalScrollBar()->value();
     for(const auto &entry:entries)if(y>=entry.top&&y<entry.top+entry.height){
+        if(entry.text&&event->button()==Qt::LeftButton){
+            const QString anchor=entry.text->documentLayout()->anchorAt(QPointF(event->position().x()-24,y-entry.top));
+            const QUrl url=base.resolved(QUrl(anchor));
+            if(!anchor.isEmpty()&&(url.scheme()=="https"||url.scheme()=="http")){
+                QDesktopServices::openUrl(url);event->accept();return;
+            }
+        }
         if(entry.block.resource){
             const QUrl file=ResourceResolver::resolve(entry.block.resource->uri,base);
             if(!ResourceResolver::isPreviewResource(file)&&file.isLocalFile()&&event->button()==Qt::LeftButton){QDesktopServices::openUrl(file);event->accept();return;}

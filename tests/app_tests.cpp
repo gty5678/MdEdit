@@ -8,7 +8,91 @@ int runTableEditTests();
 int runPdfTests(QApplication &app);
 
 std::optional<int> runAppTests(QApplication &app){
+    if(app.arguments().contains("--task-marker-test")){
+        for(const QString &prefix:{QString("- [ ] "),QString("- [x] "),QString("- [X] "),QString("  - [ ] "),QString("1. [x] "),QString("- ")}){
+            LiveEditor editor;editor.resize(640,300);editor.show();
+            const QString source="before\n\n"+prefix+"task\n\nafter";
+            editor.setSource(source);editor.restoreSourceSelection(0,0);app.processEvents();
+            QTextBlock item;
+            for(auto block=editor.document()->begin();block.isValid();block=block.next())
+                if(block.textList()){item=block;break;}
+            if(!item.isValid())return 1;
+            const QRect caret=editor.cursorRect(QTextCursor(item));
+            const QPointF point(caret.left()-12,caret.center().y());
+            QMouseEvent press(QEvent::MouseButtonPress,point,point,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(editor.viewport(),&press);
+            QMouseEvent release(QEvent::MouseButtonRelease,point,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(editor.viewport(),&release);
+            const int expected=8+(prefix.contains('[')?prefix.indexOf('[')+2:0);
+            if(editor.sourceSelection()!=qMakePair(expected,expected)||editor.markdown()!=source){
+                qWarning()<<"Task marker caret"<<prefix<<editor.sourceSelection()<<expected;return 2;
+            }
+        }
+        return 0;
+    }
     if(app.arguments().contains("--inline-boundary-test")){
+        // Exposed delimiters stay visible until the caret passes their outer edge.
+        for(const QString &token:{QString("**Bold 123**"),QString("**Bold 123\\*\\* end**"),
+                                  QString("**Bold 123\\\\**")}){
+            for(const bool right:{false,true}){
+                LiveEditor editor;
+                const QString source="a "+token+" z";
+                editor.setSource(source);
+                const int begin=2,end=begin+token.size();
+                int at=right?end-2:begin+2;
+                editor.restoreSourceSelection(at,at);
+                while(right?at<=end:at>=begin){
+                    if(editor.toPlainText()!=source||editor.sourceSelection()!=qMakePair(at,at)){
+                        qWarning()<<"Premature inline collapse"<<token<<right<<at<<editor.toPlainText();return 90;
+                    }
+                    QKeyEvent event(QEvent::KeyPress,right?Qt::Key_Right:Qt::Key_Left,Qt::NoModifier);
+                    QApplication::sendEvent(&editor,&event);
+                    at+=right?1:-1;
+                }
+                if(editor.toPlainText()==source||editor.markdown()!=source||
+                   editor.sourceSelection()!=qMakePair(at,at)){
+                    qWarning()<<"Inline did not collapse after exit"<<token<<right<<editor.toPlainText();return 91;
+                }
+            }
+        }
+        for(const bool backwards:{false,true}){
+            for(const auto &entry:QList<QPair<QString,QString>>{
+                {QString("before\n\n==的的==\n\n*的的三个*后文\n\nafter"),QString("before\n\n后文\n\nafter")},
+                {QString("before\n\n前文==高亮==后文\n\nafter"),QString("before\n\n前文后文\n\nafter")}}){
+                LiveEditor editor;editor.setSource(entry.first);editor.restoreSourceSelection(0,0);
+                const QString visible=editor.toPlainText();
+                const int start=visible.contains("前文")?visible.indexOf("前文")+2:visible.indexOf("的的");
+                const int end=visible.indexOf("后文");
+                QTextCursor cursor(editor.document());cursor.setPosition(backwards?end:start);
+                cursor.setPosition(backwards?start:end,QTextCursor::KeepAnchor);editor.setTextCursor(cursor);
+                QKeyEvent event(QEvent::KeyPress,Qt::Key_Backspace,Qt::NoModifier);
+                QApplication::sendEvent(&editor,&event);
+                if(editor.markdown()!=entry.second){qWarning()<<"Cross preview deletion"<<editor.markdown();return 6;}
+            }
+        }
+        for(const QString &token:{QString("==的的=="),QString("*斜体*"),QString("**粗体**"),
+                                  QString("~~删除线~~"),QString("`code`"),QString("$x+y$"),
+                                  QString("[链接](https://example.com)"),QString("***嵌套***")}){
+            for(const bool backwards:{false,true})
+            for(const int key:{int(Qt::Key_Backspace),int(Qt::Key_Delete)}){
+                LiveEditor editor;
+                editor.setSource("before\n\n"+token+"\n\nafter");
+                editor.restoreSourceSelection(0,0);
+                const QString visible=editor.toPlainText();
+                const int start=visible.indexOf('\n')+2;
+                const int end=visible.lastIndexOf("\n\nafter");
+                if(start<2||end<=start){qWarning()<<"Missing preview"<<token<<visible;return 4;}
+                QTextCursor selected(editor.document());
+                selected.setPosition(backwards?end:start);
+                selected.setPosition(backwards?start:end,QTextCursor::KeepAnchor);
+                editor.setTextCursor(selected);
+                QKeyEvent event(QEvent::KeyPress,key,Qt::NoModifier);
+                QApplication::sendEvent(&editor,&event);
+                if(editor.markdown()!="before\n\n\n\nafter"){
+                    qWarning()<<"Preview deletion left syntax"<<token<<backwards<<editor.markdown();return 5;
+                }
+            }
+        }
         for(const auto &entry:QList<QPair<QString,int>>{
             {"**bold**",2},{QString::fromUtf8("**粗体**"),2},{"*italic*",1},{"***bold***",3},
             {"`code`",1},{"``a`b``",2},{"~~gone~~",2},{"==highlight==",2},{"$x+y$",1}}){
@@ -226,6 +310,23 @@ std::optional<int> runAppTests(QApplication &app){
             return false;
         };
         if(!marked(0)||marked(2)||!marked(4))return 70;
+        {
+            const QString links="[site](https://example.com/a_(b)) <https://example.com> [ref][id]";
+            QTextDocument sourceDoc;sourceDoc.setPlainText(links+"\n`https://example.com`\n```\nhttps://example.com\n```");
+            Highlighter linkSyntax(&sourceDoc);linkSyntax.rehighlight();
+            auto colorAt=[&](int row,int offset){
+                for(const auto &range:sourceDoc.findBlockByNumber(row).layout()->formats())
+                    if(offset>=range.start&&offset<range.start+range.length)return range.format.foreground().color();
+                return QColor();
+            };
+            if(colorAt(0,2)!=QColor("#2468b4")||colorAt(0,15)!=QColor("#2468b4")||
+               colorAt(0,links.indexOf("ref"))!=QColor("#2468b4")||
+               colorAt(1,2)==QColor("#2468b4")||colorAt(3,2)==QColor("#2468b4"))return 71;
+            LiveEditor linkEditor;linkEditor.setSource("[site](https://example.com)");
+            linkEditor.restoreSourceSelection(3,3);
+            if(linkEditor.document()->find("site").charFormat().foreground().color()!=QColor("#2468b4"))return 72;
+        }
+
         LiveEditor editor;editor.resize(800,500);editor.setSource(source);
         if(editor.toPlainText()!= "before yellow after bold and italic and deleted")return 65;
         editor.restoreSourceSelection(11,11);
@@ -238,9 +339,74 @@ std::optional<int> runAppTests(QApplication &app){
         if(editor.toPlainText().contains("==")||editor.markdown()!=expected)return 68;
         return 0;
     }
+    if(app.arguments().contains("--rule-test")){
+        // Setext is disabled in both the shared renderer and live preview.
+        for(const QString &sample:{QString("before\n---\nafter"),QString("**before**\n-----\nafter")}){
+            QTextDocument document;QStringList errors;renderMarkdown(&document,sample,errors);
+            int rules=0;
+            for(auto block=document.begin();block.isValid();block=block.next()){
+                if(block.blockFormat().headingLevel())return 6;
+                if(block.blockFormat().hasProperty(QTextFormat::BlockTrailingHorizontalRulerWidth))++rules;
+            }
+            if(rules!=1||!errors.isEmpty())return 7;
+            LiveEditor editor;editor.setSource(sample);
+            const auto rule=editor.document()->findBlockByNumber(1);
+            if(!rule.blockFormat().hasProperty(QTextFormat::BlockTrailingHorizontalRulerWidth)||
+               editor.document()->blockCount()!=3||editor.markdown()!=sample)return 8;
+            editor.restoreSourceSelection(sample.indexOf('-'),sample.indexOf('-'));
+            if(editor.textCursor().block().text()!=sample.split('\n')[1]||editor.markdown()!=sample)return 9;
+        }
+        for(const QString &sample:{QString("before\n===\nafter"),QString("> before\n> ==="),
+                                  QString("before\n--\nafter"),QString("before\n=\nafter")}){
+            QTextDocument document;QStringList errors;renderMarkdown(&document,sample,errors);
+            for(auto block=document.begin();block.isValid();block=block.next())
+                if(block.blockFormat().headingLevel())return 10;
+            if(!document.toPlainText().contains(sample.contains('=')?"=":"--"))return 11;
+        }
+        for(const QString &sample:{QString("```\nbefore\n---\n===\n```"),QString("    before\n    ---\n    ===")}){
+            QTextDocument document;QStringList errors;renderMarkdown(&document,sample,errors);
+            if(!document.toPlainText().contains("---")||!document.toPlainText().contains("==="))return 12;
+        }
+        QTextDocument heading;QStringList errors;renderMarkdown(&heading,"## heading",errors);
+        if(heading.begin().blockFormat().headingLevel()!=2)return 13;
+        for(const QString &sample:{QString("---\nafter"),QString("---\n---"),QString("# heading\n---\nafter")}){
+            LiveEditor editor;editor.setSource(sample);
+            if(editor.document()->blockCount()!=sample.count('\n')+1){
+                qWarning()<<"Rule inserted extra blocks"<<sample<<editor.toPlainText();return 5;
+            }
+        }
+        for(const QString &marker:{QString("---"),QString("***"),QString("___")}){
+            LiveEditor editor;editor.resize(640,100);editor.show();
+            const QString source="before\n\n"+marker+"\n\nafter";
+            editor.setSource(source);app.processEvents();
+            auto rule=editor.document()->findBlockByNumber(2);
+            if(editor.document()->blockCount()!=5||
+               !rule.blockFormat().hasProperty(QTextFormat::BlockTrailingHorizontalRulerWidth))return 1;
+            const auto bounds=editor.document()->documentLayout()->blockBoundingRect(rule);
+            const auto body=editor.document()->documentLayout()->blockBoundingRect(editor.document()->begin());
+            if(bounds.height()>body.height()+1)return 2;
+            for(const qreal fraction:{0.25,0.75,0.98}){
+                editor.setSource("");editor.setSource(source);app.processEvents();
+                rule=editor.document()->findBlockByNumber(2);
+                const auto rect=editor.document()->documentLayout()->blockBoundingRect(rule);
+                editor.restoreSourceSelection(0,0);
+                const auto after=editor.document()->documentLayout()->blockBoundingRect(editor.document()->lastBlock());
+                const qreal previousY=after.top()-editor.verticalScrollBar()->value();
+                const QPointF point(300,rect.top()+fraction*rect.height()-editor.verticalScrollBar()->value());
+                QMouseEvent press(QEvent::MouseButtonPress,point,point,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+                QApplication::sendEvent(editor.viewport(),&press);
+                QMouseEvent release(QEvent::MouseButtonRelease,point,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+                QApplication::sendEvent(editor.viewport(),&release);
+                if(editor.sourceSelection().second!=8||editor.textCursor().block().text()!=marker)return 3;
+                const auto next=editor.document()->documentLayout()->blockBoundingRect(editor.document()->lastBlock());
+                if(qAbs(next.top()-editor.verticalScrollBar()->value()-previousY)>1)return 4;
+            }
+        }
+        return 0;
+    }
     if(app.arguments().contains("--line-spacing-test")){
         LiveEditor editor;editor.resize(900,700);editor.show();
-        const QString source="alpha\nbeta\n\n \n\n**bold** text\nomega\n";
+        const QString source="alpha\nbeta\n\n---\n---\n\n***\n\n___\n\n \n\n**bold** text\nomega\n";
         for(int size:{9,14,24}){
             editor.setFont(QFont(previewFont,size));editor.setSource(source);editor.refreshAppearance();
             auto verify=[&]{
@@ -405,7 +571,7 @@ $$\frac{1}{2}+\sqrt{x}+\int_0^1 x^2\,dx$$)",errors)!=3||!errors.isEmpty())return
                 const auto cell=table->cellAt(cursor);
                 const int label=tableView.gutterLineNumberAt(cursor);
                 if((label>0)!=(cell.column()==0))return 5;
-                if(label>0&&label!=(cell.row()==0?3:cell.row()+4))return 7;
+                if(label>0&&label!=3)return 7;
                 labels+=label>0;++cells;
             }
         }
@@ -605,13 +771,13 @@ $$$$
             settingsWindow.showSettings();
             auto *dialog=settingsWindow.findChild<QDialog *>("settingsDialog");
             auto *size=dialog->findChild<QSpinBox *>("baseFontSize");size->setValue(17);
-            images=checkLive(source->font().pointSize()==18&&liveView->font().pointSize()==17&&
+            images=checkLive(source->font().pointSize()==18&&liveView->font().pointSize()==19&&
                 source->toPlainText()=="# Heading\n\nBody"&&!source->document()->isModified()&&
                 settingsWindow.selection()==qMakePair(2,9),__LINE__)&&images;
             const auto heading=liveView->document()->begin().begin().fragment().charFormat();
-            images=checkLive(heading.fontPointSize()==34&&!heading.hasProperty(QTextFormat::FontSizeAdjustment),__LINE__)&&images;
+            images=checkLive(heading.fontPointSize()==38&&!heading.hasProperty(QTextFormat::FontSizeAdjustment),__LINE__)&&images;
             Window restored;
-            images=checkLive(restored.findChild<QTextBrowser *>("markdownPreview")->font().pointSize()==17,__LINE__)&&images;
+            images=checkLive(restored.findChild<QTextBrowser *>("markdownPreview")->font().pointSize()==19,__LINE__)&&images;
             dialog->close();QSettings().remove("appearance/baseFontSize");
         }
         Window live;
@@ -1310,6 +1476,106 @@ $$$$
         }
         {
             LiveEditor probe;
+            // Exercise the real mouse path with the old caret in another block.
+            QString clickSource;
+            for(int i=0;i<12;++i)clickSource+="Paragraph **bold**\n\n";
+            clickSource+="Prefix **kept** $$\\frac{1}{\\frac{1}{x}}$$ Suffix **kept**\n\n";
+            for(int i=0;i<20;++i)clickSource+="Following paragraph\n\n";
+            probe.resize(700,500);probe.setSource(clickSource);
+            probe.restoreSourceSelection(0,0);
+            const int object=probe.toPlainText().indexOf(QChar::ObjectReplacementCharacter);
+            QTextCursor formula(probe.document());formula.setPosition(object);
+            probe.verticalScrollBar()->setValue(probe.cursorRect(formula).top()-180);
+            const int scrollBefore=probe.verticalScrollBar()->value();
+            const auto tailBefore=probe.document()->documentLayout()->blockBoundingRect(probe.document()->lastBlock()).top()-scrollBefore;
+            QPoint hit=probe.cursorRect(formula).center();hit.rx()+=1;
+            QMouseEvent press(QEvent::MouseButtonPress,QPointF(hit),QPointF(probe.viewport()->mapToGlobal(hit)),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(probe.viewport(),&press);
+            QMouseEvent release(QEvent::MouseButtonRelease,QPointF(hit),QPointF(probe.viewport()->mapToGlobal(hit)),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(probe.viewport(),&release);
+            const auto tailAfter=probe.document()->documentLayout()->blockBoundingRect(probe.document()->lastBlock()).top()-probe.verticalScrollBar()->value();
+            images=checkLive(probe.verticalScrollBar()->value()==scrollBefore&&tailAfter>=tailBefore&&
+                probe.toPlainText().contains("$$")&&!probe.toPlainText().contains("**kept**")&&probe.markdown()==clickSource,__LINE__)&&images;
+            for(const QString &raw:{QString("$$x^2$$"),QString("$$\nx^2\n$$"),QString("$$\nx^2\n  $$")}){
+                const QString original="Before\n\n"+raw+"\n\nAfter";
+                for(int side:{0,1}){
+                    probe.setSource(QString());probe.setSource(original);
+                    const int at=probe.toPlainText().indexOf(QChar::ObjectReplacementCharacter);
+                    QTextCursor start(probe.document());start.setPosition(at);
+                    const QRect left=probe.cursorRect(start);
+                    start.setPosition(at+1);const QRect right=probe.cursorRect(start);
+                    const QPoint point(side?right.left()-1:left.left()+1,left.center().y());
+                    QMouseEvent down(QEvent::MouseButtonPress,QPointF(point),QPointF(probe.viewport()->mapToGlobal(point)),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+                    QApplication::sendEvent(probe.viewport(),&down);
+                    QMouseEvent up(QEvent::MouseButtonRelease,QPointF(point),QPointF(probe.viewport()->mapToGlobal(point)),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+                    QApplication::sendEvent(probe.viewport(),&up);
+                    const int expected=original.indexOf("x^2")+3;
+                    images=checkLive(probe.sourceSelection()==qMakePair(expected,expected)&&probe.markdown()==original,__LINE__)&&images;
+                }
+            }
+            // A tall rendered formula must not collapse when exposed as source.
+            const QString tall="Before\n\n$$\\frac{1}{\\frac{1}{\\frac{1}{x}}}$$\n\nAfter";
+            probe.resize(700,500);
+            probe.setSource(tall);
+            const auto tailTop=[&]{return probe.document()->documentLayout()->blockBoundingRect(probe.document()->lastBlock()).top();};
+            const qreal originalTail=tailTop();
+            const int formulaStart=tall.indexOf("$$");
+            probe.restoreSourceSelection(formulaStart+2,formulaStart+2);
+            images=checkLive(tailTop()>=originalTail,__LINE__)&&images;
+            // The source stays above a live preview inside the same formula region.
+            probe.restoreSourceSelection(formulaStart+2,tall.lastIndexOf("$$"));
+            probe.insertPlainText("x");
+            images=checkLive(tailTop()>=originalTail&&probe.markdown()=="Before\n\n$$x$$\n\nAfter",__LINE__)&&images;
+            probe.restoreSourceSelection(formulaStart+3,formulaStart+3);
+            images=checkLive(tailTop()>=originalTail,__LINE__)&&images;
+            probe.restoreSourceSelection(probe.markdown().indexOf("After"),probe.markdown().indexOf("After"));
+            images=checkLive(tailTop()<originalTail-1,__LINE__)&&images;
+            const QString display="$$\nx^2\n$$\n\nAfter";
+            probe.setSource(display);
+            probe.restoreSourceSelection(4,4);
+            const auto previewMargin=[&]{return probe.document()->findBlock(probe.toPlainText().indexOf("$$",2)).blockFormat().bottomMargin();};
+            const qreal margin=previewMargin();
+            const qreal sourceTop=probe.document()->documentLayout()->blockBoundingRect(probe.document()->firstBlock()).top();
+            auto *preview=probe.findChild<QWidget *>("mathPreviewView");
+            auto *previewDocument=probe.findChild<QTextDocument *>("mathPreviewDocument");
+            auto *panel=probe.findChild<QFrame *>("mathPreviewPanel");
+            auto previewSource=[&]{
+                QString result;
+                if(previewDocument)for(auto block=previewDocument->begin();block.isValid();block=block.next())
+                    for(auto it=block.begin();!it.atEnd();++it)result+=it.fragment().charFormat().stringProperty(formulaMarkdown);
+                return result;
+            };
+            images=checkLive(panel&&!panel->isWindow()&&panel->parentWidget()==probe.viewport()&&preview&&margin>24&&previewSource().contains("x^2")&&
+                probe.markdown()==display&&probe.toPlainText().contains("x^2"),__LINE__)&&images;
+            QKeyEvent changeFormula(QEvent::KeyPress,Qt::Key_Y,Qt::NoModifier,"y");
+            QApplication::sendEvent(&probe,&changeFormula);
+            QString changed=display;changed.insert(4,'y');
+            images=checkLive(probe.markdown()==changed&&previewMargin()>24&&
+                qAbs(probe.document()->documentLayout()->blockBoundingRect(probe.document()->firstBlock()).top()-sourceTop)<0.1&&previewSource().contains("xy^2")&&
+                probe.sourceSelection()==qMakePair(5,5),__LINE__)&&images;
+            probe.resize(700,500);probe.show();probe.activateWindow();QApplication::setActiveWindow(&probe);probe.setFocus();settle();
+            images=checkLive(panel&&!panel->isHidden()&&probe.hasFocus()&&
+                panel->geometry().top()>probe.cursorRect(probe.textCursor()).bottom(),__LINE__)&&images;
+            if(panel)panel->grab().save(QDir::current().absoluteFilePath("math-edit-preview.png"));
+            probe.grab().save(QDir::current().absoluteFilePath("math-edit-layout.png"));
+            probe.restoreSourceSelection(changed.indexOf("After"),changed.indexOf("After"));
+            settle();
+            images=checkLive(!probe.toPlainText().contains("$$")&&probe.markdown()==changed&&panel&&panel->isHidden(),__LINE__)&&images;
+            QStringList matrixRows;
+            for(int row=0;row<24;++row)matrixRows.append("x & y");
+            const QString matrix="$$\\begin{pmatrix}"+matrixRows.join("\\\\")+"\\end{pmatrix}$$";
+            probe.setSource(matrix);probe.restoreSourceSelection(2,2);settle();
+            images=checkLive(preview&&preview->findChildren<QScrollBar *>().isEmpty()&&panel->height()>320&&
+                previewSource().contains("pmatrix"),__LINE__)&&images;
+            // Very wide formulas scale with the editor width rather than clip or scroll.
+            const QString wide="$$"+QString("x+").repeated(80)+"x$$";
+            probe.setSource(wide);probe.restoreSourceSelection(2,2);settle();
+            const int wideHeight=preview->height();
+            probe.resize(280,500);settle();
+            images=checkLive(preview->height()<wideHeight&&panel->width()<=probe.viewport()->width()&&
+                preview->findChildren<QScrollBar *>().isEmpty()&&probe.markdown()==wide,__LINE__)&&images;
+            probe.grab().save(QDir::current().absoluteFilePath("math-edit-narrow.png"));
+            probe.resize(700,500);settle();
             const QList<QPair<QString,QString>> cases={
                 {"- first","- first\n- "},{"9) item","9) item\n10) "},
                 {"  - [x] done","  - [x] done\n  - [ ] "},

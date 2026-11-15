@@ -33,6 +33,7 @@ public:
     void showFind(bool replace);
     void render();
 signals:
+    void fileLinkActivated(const QString &path);
     void textChanged();
     void modificationChanged(bool modified);
     void liveModeChanged(bool enabled);

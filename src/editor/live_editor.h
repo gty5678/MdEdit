@@ -4,9 +4,13 @@
 #include "resources/resource_manager.h"
 #include "tables/table_data.h"
 #include "markdown/block_parser.h"
+#include "view/pdf_preview_panel.h"
+#include "view/math_preview_widget.h"
 
 // The source remains authoritative; inline editing exposes just the active span.
 class LiveEditor : public NumberedEditor<QTextBrowser> {
+    // Implementation units under live/ share this viewport state.
+    static std::optional<mdedit::BlockViewNode> tableNodeAt(const QString &source,int offset);
     struct Region {
         int sourceStart, sourceEnd, start, end, contentEnd=-1;
         bool inlinePart=false, continuesBefore=false, continuesAfter=false;
@@ -17,14 +21,27 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
     };
     QList<Region> regions;
     QString source;
+    mutable QString numberedSource;
+    mutable QList<int> liveLineStarts;
+    mutable QList<QPair<int,int>> numberedAtomicRanges;
+    void updateLiveLineStarts() const;
+    int liveLineAtSource(int position) const;
     QTimer resourceRefreshTimer;
     int active=-1;
     bool rebuilding=false;
     bool backgroundRefresh=false;
     bool movingCursor=false;
+    bool mouseActivating=false;
     bool movingVertically=false;
     bool sourceExposed=false;
+    bool selectionSourceExpanded=false;
+    QList<QPair<int,int>> expandedSelectionPieces;
+    QPoint lastSelectionDragPoint;
+    bool selectionDragPointValid=false;
     qreal resourceEditSlotHeight=0;
+    qreal mathEditSlotHeight=0;
+    int mathEditSourceStart=-1;
+    void preserveMathSlot();
     QPointer<QTextTable> nativeTable;
     mdedit::TableData nativeData;
     QList<QStringList> nativeExports;
@@ -62,11 +79,15 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
     QPoint linkPressPosition;
     QString clickableAnchorAt(const QPoint &point) const;
     QString oldText;
+    QFrame *mathPreviewPanel=nullptr;
+    MathPreviewWidget *mathPreviewView=nullptr;
+    void syncMathPreview();
+    bool mathPreviewVisible=false;
     QCache<QString,QTextDocument> renderedMarkdown{128};
     QSet<QString> resourceRenderKeys;
     mdedit::ResourceManager resourceManager;
     int resourceSourceEditStart=-1;
-    QHash<QString,QWidget*> pdfViews;
+    mdedit::PdfPreviewPanels pdfViews;
     void syncPdfViews();
     void handlePdfAction(const QUrl &action);
     QFont renderedFont;
@@ -74,6 +95,7 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
 public:
     std::function<void(const QString &)> sourceChanged;
     std::function<void(bool)> history;
+    std::function<void(int)> insertTableRequested;
     explicit LiveEditor();
     void setSource(const QString &text);
     QString markdown()const;
@@ -84,7 +106,6 @@ public:
     int lineNumberAt(const QTextCursor &cursor)const override;
     bool formatNativeSelection(const QString &left,const QString &right);
     bool clipboardNativeCell(bool cut);
-    bool editTableAt(int sourceOffset);
     bool editResourceSourceAt(int sourceOffset);
     bool moveTableBlockAt(int sourceOffset,int direction);
     bool moveMarkdownTableTo(int sourceOffset,int boundary);
@@ -125,5 +146,6 @@ private:
     int sourcePosition(int pos)const;
     void exposeSource(int begin,int end);
     void prepareSelection();
+    void exposeSelectedRegions();
 };
 

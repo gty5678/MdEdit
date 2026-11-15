@@ -41,9 +41,13 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
         connect(editor->document(),&QTextDocument::modificationChanged,this,&MarkdownEditorWidget::modificationChanged);
         connect(&timer,&QTimer::timeout,this,[this]{if(isLiveMode())render();});
         connect(previewAction,&QAction::toggled,this,[this](bool enabled){
+            const int caretY=enabled?editor->cursorRect().top():preview->cursorRect().top();
+            const bool updates=pages->updatesEnabled();
+            pages->setUpdatesEnabled(false);
+            timer.stop();
+            const auto sourceCaret=editor->textCursor();
             if(enabled){
-                const auto caret=editor->textCursor();render();
-                preview->restoreSourceSelection(caret.anchor(),caret.position());
+                render();
             }else{
                 const auto selection=preview->sourceSelection();
                 QTextCursor caret(editor->document());caret.setPosition(selection.first);
@@ -51,11 +55,43 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
             }
             pages->setCurrentWidget(enabled?static_cast<QWidget *>(preview):editor);previewAction->setText(enabled?"Live 编辑":"源码");
             setFocusProxy(enabled?static_cast<QWidget *>(preview):editor);
-            if(enabled)preview->setFocus();else{editor->setFocus();editor->ensureCursorVisible();}
+            if(enabled){
+                preview->setFocus();
+                preview->restoreSourceSelection(sourceCaret.anchor(),sourceCaret.position());
+            }else{editor->setFocus();editor->ensureCursorVisible();}
+            // Plain text scrolls in visual lines; rich text scrolls in pixels.
+            // Measure one scroll step so both views retain the caret's viewport
+            // height even with wrapping, different fonts and block spacing.
+            auto alignCaret=[caretY](auto *view){
+                auto *bar=view->verticalScrollBar();
+                for(int attempt=0;attempt<3;++attempt){
+                    const int before=bar->value(),y=view->cursorRect().top();
+                    const int step=before<bar->maximum()?1:-1;
+                    bar->setValue(before+step);
+                    const int moved=bar->value()-before;
+                    const int pixels=y-view->cursorRect().top();
+                    if(!moved||!pixels)break;
+                    const int target=before+qRound(qreal(y-caretY)*moved/pixels);
+                    bar->setValue(target);
+                    if(bar->value()==before)break;
+                }
+            };
+            if(enabled)alignCaret(preview);else alignCaret(editor);
+            pages->setUpdatesEnabled(updates);
             emit liveModeChanged(enabled);
         });
         connect(preview,&QTextBrowser::anchorClicked,this,[this](const QUrl &url){
-            if(url.scheme()=="https"||url.scheme()=="http")QDesktopServices::openUrl(url);
+            if(url.scheme()=="mdedit-wiki"){
+                const QString target=QUrl::fromPercentEncoding(url.path(QUrl::FullyEncoded).mid(1).toUtf8());
+                const QDir folder(baseUrl.isLocalFile()?baseUrl.toLocalFile():QDir::currentPath());
+                QString file=QDir::cleanPath(folder.absoluteFilePath(target));
+                if(!QFileInfo::exists(file)&&QFileInfo(file).suffix().isEmpty()){
+                    for(const QString &suffix:{QString(".md"),QString(".markdown")})
+                        if(QFileInfo::exists(file+suffix)){file+=suffix;break;}
+                }
+                emit fileLinkActivated(file);
+            }
+            else if(url.scheme()=="https"||url.scheme()=="http")QDesktopServices::openUrl(url);
             else if(url.isRelative()&&url.path().isEmpty()&&!url.fragment().isEmpty())preview->scrollToAnchor(url.fragment());
         });
         auto command=[this](const QString &name,const QKeySequence &key,std::function<void()> fn){
@@ -67,10 +103,19 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
         command("加粗",QKeySequence::Bold,[this]{formatSelection("**","**");});
         command("斜体",QKeySequence::Italic,[this]{formatSelection("*","*");});
         command("行内代码",QKeySequence("Ctrl+Shift+C"),[this]{formatSelection("`","`");});
-        command("插入表格",QKeySequence("Ctrl+Alt+T"),[this]{
-            const auto range=selection();const int start=qMin(range.first,range.second),end=qMax(range.first,range.second);
-            const QString table="\n\n| 列 1 | 列 2 | 列 3 |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n\n";
-            replaceSource(start,end,table,start+2,start+2);
+        const QString basicTable="|  |  |\n| --- | --- |\n|  |  |\n\n";
+        const auto insertTableAtLine=[this,basicTable](int offset){
+            const auto text=editor->toPlainText();
+            offset=qBound(0,offset,int(text.size()));
+            const int start=offset>0?text.lastIndexOf('\n',offset-1)+1:0;
+            // Replace an empty target line so its existing newline does not
+            // add another blank line after the table.
+            const int end=start<text.size()&&text.at(start)=='\n'?start+1:start;
+            replaceSource(start,end,basicTable,start,start);
+        };
+        preview->insertTableRequested=insertTableAtLine;
+        command("插入表格",QKeySequence("Ctrl+Alt+T"),[this,insertTableAtLine]{
+            const auto range=selection();insertTableAtLine(qMin(range.first,range.second));
         });
         command("插入链接",QKeySequence("Ctrl+K"),[this]{formatSelection("[","](url)");});
         command("复制段落 / 选区",QKeySequence::Copy,[this]{clipboardParagraph(false);});

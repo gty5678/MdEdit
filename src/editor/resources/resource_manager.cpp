@@ -1,9 +1,14 @@
 #include "resource_manager.h"
 #include <QPdfDocument>
 #include <QStringDecoder>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QSvgRenderer>
+#include <memory>
 namespace mdedit {
 bool ResourceResolver::isImageResource(const QUrl &url) {
     static const QSet<QString> extensions={"png","svg","jpg","jpeg","bmp","gif","webp","tif","tiff"};
+    if(url.scheme()=="http"||url.scheme()=="https")return true;
     return extensions.contains(QFileInfo(url.path()).suffix().toLower());
 }
 bool ResourceResolver::isPreviewResource(const QUrl &url) {
@@ -27,10 +32,57 @@ QString ResourceManager::request(const QUrl &url,int page) {
     const QString key=url.toString()+QString("|%1|%2").arg(info.size()).arg(info.lastModified().toMSecsSinceEpoch())+QString("|%1|page=%2").arg(revision).arg(page);
     if(cache.contains(key)||pending.contains(key))return key;
     pending.insert(key);
+    if(url.scheme()=="http"||url.scheme()=="https"){
+        QNetworkRequest request(url);
+        request.setTransferTimeout(15000);
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::NoLessSafeRedirectPolicy);
+        auto *reply=network.get(request);
+        auto bytes=std::make_shared<QByteArray>();
+        auto oversized=std::make_shared<bool>(false);
+        connect(reply,&QIODevice::readyRead,this,[reply,bytes,oversized]{
+            bytes->append(reply->readAll());
+            if(bytes->size()>32*1024*1024){*oversized=true;reply->abort();}
+        });
+        const auto generation=revision;
+        connect(reply,&QNetworkReply::finished,this,[this,reply,bytes,oversized,key,generation]{
+            bytes->append(reply->readAll());
+            pending.remove(key);
+            ResourceSnapshot data;
+            if(*oversized||bytes->size()>32*1024*1024)data.error="图片超过 32 MiB 限制";
+            else if(reply->error()!=QNetworkReply::NoError)data.error="图片加载失败："+reply->errorString();
+            else {
+                QBuffer buffer(bytes.get());buffer.open(QIODevice::ReadOnly);
+                QImageReader reader(&buffer);reader.setDecideFormatFromContent(true);reader.setAutoTransform(true);
+                if(reader.format()=="svg"||reader.format()=="svgz"){
+                    QSvgRenderer svg(*bytes);
+                    QSize size=svg.defaultSize();
+                    if(!svg.isValid()||size.isEmpty())data.error="SVG 图片无效";
+                    else {
+                        if(size.width()>1600||size.height()>1200)size.scale(1600,1200,Qt::KeepAspectRatio);
+                        data.image=QImage(size,QImage::Format_ARGB32_Premultiplied);data.image.fill(Qt::transparent);
+                        QPainter painter(&data.image);svg.render(&painter);
+                    }
+                }else {
+                    const QSize size=reader.size();
+                    if(size.isValid()&&qint64(size.width())*size.height()>100000000)data.error="图片像素数超过限制";
+                    else {
+                        if(size.width()>1600||size.height()>1200)reader.setScaledSize(size.scaled(1600,1200,Qt::KeepAspectRatio));
+                        data.image=reader.read();
+                        if(data.image.isNull())data.error="无法读取图片："+reader.errorString();
+                    }
+                }
+            }
+            reply->deleteLater();
+            if(generation!=revision)return;
+            const int cost=qMax(1,int(data.image.sizeInBytes()/1024));
+            cache.insert(key,new ResourceSnapshot(std::move(data)),cost);emit ready();
+        });
+        return key;
+    }
     pool.start([this,url,key,page]{
         ResourceSnapshot data;
         const QString path=url.toLocalFile();QFileInfo file(path);
-        if(!url.isLocalFile())data.error="首版仅支持本地资源："+url.toString();
+        if(!url.isLocalFile())data.error="不支持的资源地址："+url.toString();
         else if(!file.isFile())data.error="资源不存在："+path;
         else if(file.size()>32*1024*1024)data.error="资源超过 32 MiB 限制："+path;
         else if(file.suffix().compare("pdf",Qt::CaseInsensitive)==0) {

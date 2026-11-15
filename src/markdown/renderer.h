@@ -10,10 +10,14 @@ inline constexpr int formulaVector=QTextFormat::UserProperty+3;
 inline constexpr int formulaVectorSize=QTextFormat::UserProperty+4;
 inline constexpr int formulaMarkdown=QTextFormat::UserProperty+5;
 struct InlineEditingStyle { int start,length; QTextCharFormat format; };
+QList<InlineEditingStyle> linkEditingStyles(const QString &source);
 QList<InlineEditingStyle> inlineEditingStyles(const QString &source);
 qreal bodyLineHeight(const QFont &font);
 void setBodyLineHeight(QTextBlockFormat &format,const QFont &font);
 bool isCodeBlock(const QTextBlockFormat &format);
 QTextCharFormat headingCharacters(int level,const QFont &base);
 void installFormulaImageHandler(QTextDocument *document);
+QString markdownWithoutSetext(const QString &source);
 int renderMarkdown(QTextDocument *document,const QString &source,QStringList &errors,bool live=false);
+
+void restoreImageLinks(QTextDocument *document,const QString &source);

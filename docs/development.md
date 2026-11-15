@@ -17,7 +17,7 @@
 - `src/editor/markdown/block_parser.*`：文档块识别与 UTF-16 源码范围。
 - `src/editor/resources/resource_manager.*`：本地资源解析、异步加载与缓存。
 - `src/editor/render/renderer_registry.*`：资源预览绘制分派。
-- `src/editor/tables/`：表格数据模型与 CSV 编辑面板。
+- `src/editor/tables/`：Markdown 表格数据模型。
 - `src/editor/view/markdown_preview_widget.*`：独立预览基础组件。
 - `src/window.*`：主窗口、菜单、文件读写和设置。
 - `tests/app_tests.*`：现有 `--smoke-test`、`--edit-menu-test`、`--table-gutter-test` 测试入口；保留原命令行调用方式。
@@ -120,6 +120,6 @@ ctest --preset macos-qt-debug
 ctest --test-dir build-macos-qt612 --output-on-failure
 ```
 
-当前 CTest 包含 architecture、table-edit、live-pdf、live-csv、typing-style、highlight、line-spacing、formula-vector、embedded-editor 和 markdown-math-smoke 共 10 项。综合示例见 [综合测试.md](../综合测试.md)。
+当前 CTest 包含 architecture、table-edit、live-pdf、live-csv、typing-style、highlight、line-spacing、formula-vector、embedded-editor、inline-boundary、markdown-math-smoke 和 document-workflow 共 12 项。综合示例见 [综合测试.md](../综合测试.md)。
 
-资源编辑器仍在持续完善，尚未实现远程资源加载、外部文件自动监视、DXF/GLB 预览和大表格虚拟化。独立预览基础组件与应用 Live 编辑器的能力范围不同；模块边界与实现限制见 [基础版本说明](resource-editor-foundation.md)。
+资源编辑器仍在持续完善，尚未实现远程资源加载、正文及嵌入资源外部变化自动刷新、DXF/GLB 预览和大表格虚拟化。独立预览基础组件与应用 Live 编辑器的能力范围不同；模块边界与实现限制见 [基础版本说明](resource-editor-foundation.md)。

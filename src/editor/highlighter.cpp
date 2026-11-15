@@ -21,6 +21,11 @@ void Highlighter::highlightBlock(const QString &text) {
         }
         static const QList<QPair<QRegularExpression,QString>> rules={{QRegularExpression("^#{1,6} .*$"),"#623e9c"},{QRegularExpression("\\*\\*.+?\\*\\*"),"#825018"}};
         for(const auto &r:rules){auto matches=r.first.globalMatch(text);while(matches.hasNext()){auto m=matches.next();QTextCharFormat f;f.setForeground(QColor(r.second));setFormat(m.capturedStart(),m.capturedLength(),f);}}
+        for(const auto &style:linkEditingStyles(text)){
+            for(int at=style.start;at<style.start+style.length;++at){
+                auto characters=format(at);characters.merge(style.format);setFormat(at,1,characters);
+            }
+        }
         for(const auto &range:highlightRanges(text)){
             const int position=currentBlock().position()+range.first;
             const bool protectedText=std::any_of(spans.cbegin(),spans.cend(),[&](const Span &span){
