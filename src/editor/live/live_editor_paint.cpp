@@ -15,8 +15,9 @@ QTextCharFormat LiveEditor::codeCharacters()const{
 
 bool LiveEditor::viewportEvent(QEvent *event){
     if(event->type()==QEvent::Resize||event->type()==QEvent::Show){
-        QTimer::singleShot(0,this,[this]{if(!rebuilding){layoutNativeTables();styleActiveSource();}});
+        QTimer::singleShot(0,this,[this]{if(!rebuilding){layoutNativeTables();styleActiveSource();resourceWindowTimer.start();}});
     }
+    if(event->type()==QEvent::Hide)resourceWindowTimer.start();
     if(event->type()==QEvent::Hide&&mathPreviewPanel)mathPreviewPanel->hide();
     if(event->type()==QEvent::Leave){tableHoverPoint=QPoint(-100,-100);viewport()->update();}
     return QTextBrowser::viewportEvent(event);

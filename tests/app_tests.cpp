@@ -8,6 +8,98 @@ int runTableEditTests();
 int runPdfTests(QApplication &app);
 
 std::optional<int> runAppTests(QApplication &app){
+    if(app.arguments().contains("--web-link-test")){
+        QTextBrowser capture;QUrl opened;
+        QObject::connect(&capture,&QTextBrowser::anchorClicked,[&](const QUrl &url){opened=url;});
+        QTemporaryDir folders;
+        if(!folders.isValid()||!QDir(folders.path()).mkdir("项目 资料"))return 1;
+        const QUrl local=QUrl::fromLocalFile(folders.filePath("项目 资料"));
+        const QString nativeSeparators="file:"+local.path(QUrl::FullyEncoded).replace('/','\\');
+        const QUrl web("https://www.baidu.com");
+        const QList<QPair<QString,QUrl>> cases={
+            {"www.baidu.com",web},{"www\\.baidu.com",web},{web.toString(),web},
+            {local.toString(QUrl::FullyEncoded),local},{nativeSeparators,local},
+            {"<"+QUrl::fromPercentEncoding(nativeSeparators.toUtf8())+">",local}
+        };
+        QDesktopServices::setUrlHandler("https",&capture,"anchorClicked");
+        QDesktopServices::setUrlHandler("file",&capture,"anchorClicked");
+        for(const auto &[target,expected]:cases){
+            MarkdownEditorWidget widget;widget.resize(640,360);widget.show();
+            const QString source="intro\n\n[打开]("+target+")\n\nend";
+            widget.setMarkdown(source);app.processEvents();
+            auto *view=widget.findChild<QTextBrowser *>("markdownPreview");
+            auto label=view->document()->find("打开");if(label.isNull())return 1;
+            label.setPosition(label.selectionStart()+1);
+            const QPoint point=view->cursorRect(label).center();
+            opened=QUrl();
+            QMouseEvent press(QEvent::MouseButtonPress,point,view->viewport()->mapToGlobal(point),Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(view->viewport(),&press);
+            QMouseEvent release(QEvent::MouseButtonRelease,point,view->viewport()->mapToGlobal(point),Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(view->viewport(),&release);
+            if(opened!=expected||widget.markdown()!=source){qWarning()<<target<<opened;return 2;}
+        }
+        QDesktopServices::unsetUrlHandler("file");
+        QDesktopServices::unsetUrlHandler("https");
+        if(normalizedWebLink(QUrl("README.md"))!=QUrl("README.md")||normalizedWebLink(QUrl("#heading"))!=QUrl("#heading"))return 3;
+        QTextDocument driveLinks;QStringList errors;
+        renderMarkdown(&driveLinks,R"([一](file:C:\Users\Notes) [二](file:///C:\Users\Notes) `[三](file:C:\Users\Notes)`)",errors);
+        for(const QString &label:{QString("一"),QString("二")}){
+            const auto cursor=driveLinks.find(label);
+            if(cursor.charFormat().anchorHref()!="file:///C:/Users/Notes")return 4;
+        }
+        if(!driveLinks.toPlainText().contains(R"([三](file:C:\Users\Notes))"))return 5;
+        return 0;
+    }
+    if(app.arguments().contains("--selection-menu-test")){
+        const QList<QStringList> formats={{"加粗","**","**"},{"斜体","*","*"},
+            {"删除线","~~","~~"},{"高亮","==","=="}};
+        for(bool liveMode:{false,true})for(bool reverse:{false,true})for(const auto &format:formats){
+            MarkdownEditorWidget widget;widget.resize(640,360);widget.show();widget.setLiveMode(liveMode);
+            widget.setMarkdown("before selected after");
+            widget.selectSource(reverse?15:7,reverse?7:15);app.processEvents();
+            auto *view=liveMode?static_cast<QAbstractScrollArea *>(widget.findChild<QTextBrowser *>("markdownPreview")):
+                static_cast<QAbstractScrollArea *>(widget.findChild<QPlainTextEdit *>("markdownEditor"));
+            const QPoint point(100,50);
+            QContextMenuEvent event(QContextMenuEvent::Mouse,point,view->viewport()->mapToGlobal(point));
+            QApplication::sendEvent(view->viewport(),&event);app.processEvents();
+            auto *menu=widget.findChild<QMenu *>("editorContextMenu");
+            if(!menu){qWarning()<<"Missing selection context menu"<<liveMode;return 1;}
+            QAction *chosen=nullptr;
+            for(auto *action:menu->actions()){
+                if(action->text()=="行内代码"||action->text()=="插入链接")return 5;
+                if(action->text()==format[0])chosen=action;
+            }
+            if(!chosen){qWarning()<<"Missing format action"<<format[0];return 2;}
+            menu->close();chosen->trigger();
+            if(widget.markdown()!="before "+format[1]+"selected"+format[2]+" after"){
+                qWarning()<<"Context format failed"<<liveMode<<reverse<<format[0]<<widget.markdown();return 3;
+            }
+            widget.document()->undo();
+            if(widget.markdown()!="before selected after")return 4;
+        }
+        for(bool liveMode:{false,true})for(const QString &name:{QString("插入链接"),QString("插入代码块")}){
+            MarkdownEditorWidget widget;widget.resize(640,360);widget.show();widget.setLiveMode(liveMode);
+            widget.setMarkdown("before selected after");widget.selectSource(7,7);app.processEvents();
+            auto *live=widget.findChild<QTextBrowser *>("markdownPreview");
+            auto *plain=widget.findChild<QPlainTextEdit *>("markdownEditor");
+            auto *view=liveMode?static_cast<QAbstractScrollArea *>(live):static_cast<QAbstractScrollArea *>(plain);
+            const QPoint point=(liveMode?live->cursorRect():plain->cursorRect()).center();
+            QContextMenuEvent event(QContextMenuEvent::Mouse,point,view->viewport()->mapToGlobal(point));
+            QApplication::sendEvent(view->viewport(),&event);app.processEvents();
+            auto *menu=widget.findChild<QMenu *>("editorContextMenu");if(!menu)return 6;
+            QAction *chosen=nullptr;
+            for(auto *action:menu->actions()){
+                if(action->text()=="加粗"||action->text()=="行内代码")return 7;
+                if(action->text()==name)chosen=action;
+            }
+            if(!chosen)return 8;
+            menu->close();chosen->trigger();
+            const QString expected=name=="插入链接"?"before [](url)selected after":"before \n```\n\n```\nselected after";
+            if(widget.markdown()!=expected){qWarning()<<name<<liveMode<<widget.markdown();return 9;}
+            widget.document()->undo();if(widget.markdown()!="before selected after")return 10;
+        }
+        return 0;
+    }
     if(app.arguments().contains("--task-marker-test")){
         for(const QString &prefix:{QString("- [ ] "),QString("- [x] "),QString("- [X] "),QString("  - [ ] "),QString("1. [x] "),QString("- ")}){
             LiveEditor editor;editor.resize(640,300);editor.show();
@@ -187,6 +279,8 @@ std::optional<int> runAppTests(QApplication &app){
         editor.setSource(longSource);editor.restoreSourceSelection(0,0);app.processEvents();
         for(int repeat=0;repeat<3;++repeat){
             editor.verticalScrollBar()->setValue(editor.verticalScrollBar()->maximum());
+            elapsed.restart();
+            while(!imageState("csv-ready")&&elapsed.elapsed()<5000){app.processEvents();QThread::msleep(1);}
             const int scroll=editor.verticalScrollBar()->value();
             auto cursor=csvCursor();if(cursor.isNull())return 11;
             const QPoint point=editor.cursorRect(cursor).center()+QPoint(8,0);
@@ -525,6 +619,17 @@ $$\frac{1}{2}+\sqrt{x}+\int_0^1 x^2\,dx$$)",errors)!=3||!errors.isEmpty())return
         if(!first->document()->isModified())return 16;
         first->setMarkdown("replacement");
         if(first->document()->isModified()||first->markdown()!="replacement")return 17;
+        // Drop the previous document's resource base when opening a memory-only record.
+        second->setBaseUrl(QUrl::fromLocalFile(QDir::tempPath()+"/"));
+        second->setMarkdown("数据库正文",QUrl{});
+        auto *secondPreview=second->findChild<QTextBrowser *>("markdownPreview");
+        if(!secondPreview||!secondPreview->document()->baseUrl().isEmpty()||
+           second->document()->isModified())return 19;
+        second->selectSource(0,3);
+        second->formatSelection("**","**");
+        if(second->markdown()!="**数据库**正文"||!second->document()->isModified())return 20;
+        second->document()->setModified(false);
+        if(second->document()->isModified())return 21;
         QWidget otherHost;
         first->setParent(&otherHost);first->show();first->setFocus();app.processEvents();
         if(first->parentWidget()!=&otherHost||first->markdown()!="replacement")return 18;
@@ -1553,8 +1658,9 @@ $$$$
             images=checkLive(probe.markdown()==changed&&previewMargin()>24&&
                 qAbs(probe.document()->documentLayout()->blockBoundingRect(probe.document()->firstBlock()).top()-sourceTop)<0.1&&previewSource().contains("xy^2")&&
                 probe.sourceSelection()==qMakePair(5,5),__LINE__)&&images;
-            probe.resize(700,500);probe.show();probe.activateWindow();QApplication::setActiveWindow(&probe);probe.setFocus();settle();
-            images=checkLive(panel&&!panel->isHidden()&&probe.hasFocus()&&
+            probe.resize(700,500);probe.show();probe.activateWindow();probe.setFocus();settle();
+            // The window remembers its focus widget even when the application is in the background.
+            images=checkLive(panel&&!panel->isHidden()&&probe.focusWidget()==&probe&&
                 panel->geometry().top()>probe.cursorRect(probe.textCursor()).bottom(),__LINE__)&&images;
             if(panel)panel->grab().save(QDir::current().absoluteFilePath("math-edit-preview.png"));
             probe.grab().save(QDir::current().absoluteFilePath("math-edit-layout.png"));

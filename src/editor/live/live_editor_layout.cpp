@@ -2,8 +2,11 @@
 #include "../../markdown/scanner.h"
 #include "../../markdown/renderer.h"
 #include <limits>
+#include <utility>
 
 void LiveEditor::rebuild(int chosen,int offset,int forcedTarget){
+        initialRenderTimer.stop();
+        const int openingLimit=std::exchange(initialRenderLimit,0);
         nativeTable.clear();nativeStart=nativeEnd=-1;sourceCellRow=sourceCellColumn=-1;
         rebuilding=true;int scroll=verticalScrollBar()->value();
         // Clearing/repopulating the document temporarily collapses the scroll
@@ -77,6 +80,15 @@ void LiveEditor::rebuild(int chosen,int offset,int forcedTarget){
         }
         if(begin<source.size())units.append({begin,int(source.size())});
         if(source.isEmpty()||source.endsWith('\n'))units.append({int(source.size()),int(source.size())});
+        if(openingLimit>0){
+            // Never truncate a fence, formula, table or paragraph midway.
+            qsizetype count=0;
+            while(count<units.size()){
+                const int end=units[count++].second;
+                if(end>=openingLimit)break;
+            }
+            units=units.mid(0,count);
+        }
         // Split text and headings when each source line can render independently.
         struct ListItem { QString listSource; int blockNumber; };
         QHash<int,ListItem> listItems;
@@ -510,6 +522,6 @@ void LiveEditor::rebuild(int chosen,int offset,int forcedTarget){
             }
         }else if(forcedTarget>=0)ensureCursorVisible();
         else if(target>=0)verticalScrollBar()->setValue(scroll+cursorRect().top()-caretY);
-        rebuilding=false;refreshLineNumbers();
+        rebuilding=false;refreshLineNumbers();resourceWindowTimer.start();
     }
 

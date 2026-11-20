@@ -35,6 +35,10 @@ int main(int argc,char **argv){
         QString opened;
         QObject::connect(&widget,&MarkdownEditorWidget::fileLinkActivated,[&](const QString &path){opened=path;});
         view->anchorClicked(href);
+        QElapsedTimer timeout;
+        timeout.start();
+        while(opened.isEmpty()&&timeout.elapsed()<3000)
+            app.processEvents(QEventLoop::WaitForMoreEvents,10);
         CHECK(opened==target);
         CHECK(widget.markdown().contains(QString::fromUtf8("[[中文 note|显示文字]]")));
     }
@@ -281,6 +285,35 @@ int main(int argc,char **argv){
         CHECK(!links.toPlainText().contains(first));
         CHECK(links.markdown()==markdown);
     }
+    // Revealing quote markers keeps the body width and following paragraphs stable.
+    for(const QString &quote:{QString("> A quoted paragraph with enough words to wrap across the editor width. ").repeated(1),
+                              QString("> First quoted line\n> Second quoted line"),
+                              QString("> > Nested quoted text with enough words to wrap across the editor width.")}){
+        LiveEditor quoted;quoted.resize(420,400);
+        const QString markdown=QString("Before\n\n").repeated(20)+quote+"\n\nAfter\n\n"+QString("Tail\n\n").repeated(20);
+        quoted.setSource(markdown);quoted.show();app.processEvents();
+        auto afterTop=[&]{return quoted.document()->documentLayout()->blockBoundingRect(
+            quoted.document()->findBlock(quoted.document()->find("After").selectionStart())).top();};
+        const qreal before=afterTop();
+        for(int repeat=0;repeat<3;++repeat){
+            const auto label=quoted.document()->find("quoted");
+            CHECK(!label.isNull());
+            quoted.verticalScrollBar()->setValue(quoted.cursorRect(label).top()+quoted.verticalScrollBar()->value()-120);
+            const int scroll=quoted.verticalScrollBar()->value();
+            const QPointF point=quoted.cursorRect(label).center();
+            QMouseEvent press(QEvent::MouseButtonPress,point,point,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+            QApplication::sendEvent(quoted.viewport(),&press);
+            QMouseEvent release(QEvent::MouseButtonRelease,point,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(quoted.viewport(),&release);
+            app.processEvents();
+            CHECK(quoted.toPlainText().contains("> "));
+            CHECK(qAbs(afterTop()-before)<=1);
+            CHECK(qAbs(quoted.verticalScrollBar()->value()-scroll)<=1);
+            CHECK(quoted.markdown()==markdown);
+            quoted.restoreSourceSelection(0,0);
+            CHECK(qAbs(afterTop()-before)<=1);
+        }
+    }
     // Long documents have their real content and geometry before scrolling.
     LiveEditor lazy;lazy.resize(900,700);
     QString large;
@@ -474,14 +507,15 @@ int main(int argc,char **argv){
     images.restoreSourceSelection(0,0);CHECK(images.markdown()==textSource);
     // Keep the comprehensive document's real resource fixtures loadable.
     const QDir project(QFileInfo(QString::fromUtf8(__FILE__)).absoluteDir().absoluteFilePath(".."));
-    QFile comprehensive(project.filePath(QString::fromUtf8("综合测试.md")));
+    QFile comprehensive(project.filePath(QString::fromUtf8("综合测试/综合测试.md")));
     CHECK(comprehensive.open(QIODevice::ReadOnly));
     const auto resourceBlocks=mdedit::MarkdownParser::parse(QString::fromUtf8(comprehensive.readAll()));
-    const QUrl fixtureBase=QUrl::fromLocalFile(project.absolutePath()+"/");
+    const QUrl fixtureBase=QUrl::fromLocalFile(QFileInfo(comprehensive).absolutePath()+"/");
     QList<QPair<QString,bool>> fixtureKeys;
     for(const auto &block:resourceBlocks)if(block.resource){
         const auto fixtureUrl=mdedit::ResourceResolver::resolve(block.resource->uri,fixtureBase);
-        const bool expectedError=!fixtureUrl.isLocalFile()||fixtureUrl.path().contains("/errors/")||fixtureUrl.path().endsWith("does-not-exist.png");
+        if(!fixtureUrl.isLocalFile())continue;
+        const bool expectedError=fixtureUrl.path().contains("/errors/")||fixtureUrl.path().endsWith("does-not-exist.png");
         fixtureKeys.append({manager.request(fixtureUrl),expectedError});
     }
     CHECK(fixtureKeys.size()>40);

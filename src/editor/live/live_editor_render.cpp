@@ -26,6 +26,9 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
         if(auto *cached=renderedMarkdown.object(key))return cached;
         if(text.contains("!["))resourceRenderKeys.insert(key);
         auto *rendered=new ResourceTextDocument(resourceManager);
+        // Import and format the entire fragment before laying it out. Formatting
+        // individual table cells can otherwise relayout the table for every cell.
+        rendered->setLayoutEnabled(false);
         rendered->setDefaultFont(renderedFont);
         rendered->setBaseUrl(renderedBaseUrl);
         QStringList errors;
@@ -54,11 +57,12 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
             int width=qBound(320,viewport()->width()-80,960);
             int height=pdf?480:8*24+70;
             if(picture){
-                const QSize size=snapshot&&!snapshot->image.isNull()?snapshot->image.size():QSize(400,300);
+                const QSize size=snapshot&&!snapshot->image.isNull()?snapshot->image.size():resourceManager.imageSize(resolved);
                 width=resource->width>0?resource->width:qMin(size.width(),width);
                 height=qBound(1.0,double(size.height())*width/size.width(),double(std::numeric_limits<int>::max()/4));
             } // Loading and ready snapshots share geometry.
-            const QSize raster=QSize(width,height).scaled(1920,1920,Qt::KeepAspectRatio);
+            const bool resident=resourceManager.isActive(resolved)&&activeResourceTexts.contains(text.trimmed());
+            const QSize raster=resident?QSize(qMax(1,qCeil(width*devicePixelRatioF())),qMax(1,qCeil(height*devicePixelRatioF()))).boundedTo(QSize(1920,1920)):QSize(1,1);
             QImage image(raster,QImage::Format_ARGB32_Premultiplied);image.fill(picture?Qt::transparent:QColor("#f5f2f8"));
             QPainter painter(&image);painter.scale(double(raster.width())/width,double(raster.height())/height);painter.setFont(font());painter.setPen(QColor("#524960"));
             painter.save();
@@ -71,7 +75,7 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
             if(snapshot)mdedit::RendererRegistry::paint(painter,*snapshot,content);
             else painter.drawText(content,Qt::AlignCenter,pdf?"PDF 正在加载…":csv?"CSV 正在加载…":textResource?"文本正在加载…":"图片正在加载…");
             painter.end();
-            const QUrl imageUrl((pdf?"pdf-":csv?"csv-":textResource?"text-":"image-")+state+":/"+QString::number(qHash(resourceKey)));
+            const QUrl imageUrl((pdf?"pdf-":csv?"csv-":textResource?"text-":"image-")+state+":/"+QString::number(qHash(resourceKey+text+(resident?"resident":"placeholder"))));
             rendered->addResource(QTextDocument::ImageResource,imageUrl,image);
             QTextImageFormat format;format.setName(imageUrl.toString());format.setWidth(width);format.setHeight(height);
             if(pdf)format.setProperty(QTextFormat::UserProperty+82,resolved);
@@ -105,10 +109,14 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
                 if(!image.isValid()||image.hasProperty(formulaPaintAscent))continue;
                 const auto match=QRegularExpression(R"(\|([1-9][0-9]*)$)").match(image.stringProperty(QTextFormat::ImageAltText));
                 bool valid=false;const int width=match.captured(1).toInt(&valid);
-                if(!valid)continue;
+                const QUrl imageUrl(image.name());
+                const bool external=imageUrl.isRelative()||imageUrl.isLocalFile()||imageUrl.scheme()=="http"||imageUrl.scheme()=="https";
+                if(!valid&&!external)continue;
                 const QImage pixels=qvariant_cast<QImage>(rendered->resource(QTextDocument::ImageResource,QUrl(image.name())));
-                image.setWidth(width);
-                if(!pixels.isNull())image.setHeight(double(pixels.height())*width/pixels.width());
+                const QSize size=external?resourceManager.imageSize(renderedBaseUrl.resolved(imageUrl)):pixels.size();
+                const int displayWidth=valid?width:size.width();
+                image.setWidth(displayWidth);
+                if(size.isValid())image.setHeight(double(size.height())*displayWidth/size.width());
                 QTextCursor cursor(rendered);cursor.setPosition(fragment.position());cursor.setPosition(fragment.position()+fragment.length(),QTextCursor::KeepAnchor);cursor.setCharFormat(image);
             }
             auto format=block.blockFormat();
@@ -130,6 +138,7 @@ const QTextDocument *LiveEditor::renderedDocument(const QString &text,bool joine
             }
             QTextCursor(block).setBlockFormat(format);
         }
+        rendered->setLayoutEnabled(true);
         renderedMarkdown.insert(key,rendered);
         return rendered;
     }

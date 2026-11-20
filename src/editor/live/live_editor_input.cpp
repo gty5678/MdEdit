@@ -517,12 +517,12 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
         // A source line start must stay a line start even when the next
         // rendered block has a different indent or hidden Markdown prefix.
         const int beforeMove=sourcePosition(textCursor().position());
-        const bool keepLineStart=movingVertically&&event->modifiers()==Qt::NoModifier&&
+        const bool keepLineStart=movingVertically&&navigationModifiers==Qt::NoModifier&&
             !textCursor().hasSelection()&&(beforeMove==0||source[beforeMove-1]=='\n');
         std::optional<QPair<int,int>> verticalPrefix;
         int prefixColumn=0;
         if((event->key()==Qt::Key_Up||event->key()==Qt::Key_Down)&&
-            event->modifiers()==Qt::NoModifier&&!textCursor().hasSelection()){
+            navigationModifiers==Qt::NoModifier&&!textCursor().hasSelection()){
             const int at=sourcePosition(textCursor().position());
             verticalPrefix=listPrefixAt(at);
             if(verticalPrefix&&at<verticalPrefix->second)prefixColumn=at-verticalPrefix->first;
@@ -544,6 +544,21 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
             incrementalDeletion=removed.hasSelection()&&removed.selectionStart()>region.start&&
                 removed.selectionEnd()<region.end&&!raw.contains(syntax)&&
                 raw==oldText.mid(region.start,region.end-region.start);
+            // Keep the inline editing region when its body is deleted. Empty
+            // backtick pairs are not Markdown code spans, so reparsing here
+            // would expose the surrounding paragraph as source.
+            if(region.inlinePart&&raw.startsWith('`')&&
+               raw==oldText.mid(region.start,region.end-region.start)){
+                const auto spans=scanSpans(raw);
+                if(spans.size()==1&&spans.first().kind==SpanKind::Code&&!spans.first().fenced&&
+                   spans.first().start==0&&spans.first().length==raw.size()){
+                    int delimiter=1;
+                    while(delimiter<raw.size()&&raw[delimiter]=='`')++delimiter;
+                    if(removed.hasSelection()&&removed.selectionStart()>=region.start+delimiter&&
+                       removed.selectionEnd()<=region.end-delimiter&&
+                       !removed.selectedText().contains(QChar::ParagraphSeparator))incrementalDeletion=true;
+                }
+            }
         }
         {
             // QTextControl still uses the old document positions until its key
@@ -554,6 +569,13 @@ void LiveEditor::keyPressEvent(QKeyEvent *event){
         }
         // Cross-region edits temporarily use the full source so Qt can apply
         // its usual deletion and selection rules across Markdown boundaries.
+        // Selection signals were suppressed while QTextControl moved. Expose
+        // the selected previews now, preserving both anchor and moving edge;
+        // rebuilding with just the caret would collapse Shift navigation.
+        if(textCursor().hasSelection()&&toPlainText()==oldText){
+            exposeSelectedRegions();
+            return;
+        }
         if(keepLineStart){
             auto destination=textCursor();
             destination.movePosition(QTextCursor::StartOfLine);

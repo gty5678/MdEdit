@@ -1,7 +1,11 @@
 #pragma once
 #include "live_editor.h"
+#include "wiki_navigation.h"
+#include <QFutureWatcher>
+#include <QMap>
+#include <QPointer>
 
-// A complete editor surface with no file I/O, settings persistence or menu bar.
+// A complete editor surface with host-controlled document opening and saving.
 class MarkdownEditorWidget : public QWidget {
     Q_OBJECT
     QPlainTextEdit *editor=new NumberedEditor<QPlainTextEdit>;
@@ -11,14 +15,37 @@ class MarkdownEditorWidget : public QWidget {
     QList<QAction *> commands;
     QTimer timer;
     QUrl baseUrl;
+    QString projectRoot;
+    QString indexedDirectory;
+    bool recursiveIndex=false;
+    QStringList markdownFiles;
+    QFutureWatcher<QStringList> *markdownScan=nullptr;
+    QString pendingWikiReference;
+    QPointer<QDialog> wikiPicker;
+    QMap<QString,WikiLinkProvider> wikiProviders;
+    WikiLinkContext wikiContext() const { return {baseUrl,projectRoot}; }
+    void resetWikiNavigation();
+    void refreshMarkdownIndex();
+    Q_SIGNAL void markdownIndexChanged();
+    void followWikiLink(const QString &reference);
+    void chooseWikiDestination(const QString &reference,const QList<WikiLinkTarget> &targets,
+                               std::function<void(const WikiLinkTarget &)> activate);
+    void showWikiPicker(const QString &title,const QString &button,
+                        std::function<QList<WikiLinkTarget>(const QString &)> search,
+                        std::function<void(const WikiLinkTarget &)> select,bool includeMarkdownIndex=false);
     int baseFontSize=14;
     const QFont defaultUiFont=QApplication::font();
 public:
     explicit MarkdownEditorWidget(QWidget *parent=nullptr);
     QString markdown() const;
     void setMarkdown(const QString &text);
+    void setMarkdown(const QString &text,const QUrl &url);
     QTextDocument *document() const;
     void setBaseUrl(const QUrl &url);
+    void setProjectRoot(const QString &root);
+    QStringList wikiLinkCandidates(const QString &target) const;
+    bool registerWikiLinkProvider(const QString &prefix,WikiLinkProvider provider);
+    void insertWikiLink();
     bool isLiveMode() const;
     void setLiveMode(bool enabled);
     QAction *liveModeAction() const { return previewAction; }

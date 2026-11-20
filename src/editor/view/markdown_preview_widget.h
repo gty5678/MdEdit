@@ -13,6 +13,9 @@ class MarkdownPreviewWidget : public QAbstractScrollArea {
     QUrl base;
     ResourceManager resources;
     void relayout();
+    QTimer windowTimer;
+    void updateResourceWindow();
+    void buildEntries();
     QString resourceKey(const Entry &entry);
 protected:
     void paintEvent(QPaintEvent *) override;

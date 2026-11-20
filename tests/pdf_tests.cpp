@@ -59,7 +59,7 @@ int runPdfTests(QApplication &app){
         "![Document](<示例 file.pdf>)\n\nTail.\n");
     scrolling.show();
     scrolling.restoreSourceSelection(0,0);
-    scrolling.verticalScrollBar()->setValue(500);
+    scrolling.verticalScrollBar()->setValue(scrolling.verticalScrollBar()->maximum()-100);
     const int scrollBefore=scrolling.verticalScrollBar()->value();
     const auto caretBefore=scrolling.sourceSelection();
     CHECK(wait([&]{for(auto b=scrolling.document()->begin();b.isValid();b=b.next())for(auto it=b.begin();!it.atEnd();++it)if(it.fragment().charFormat().isImageFormat()&&it.fragment().charFormat().toImageFormat().name().startsWith("pdf-ready:"))return true;return false;}));

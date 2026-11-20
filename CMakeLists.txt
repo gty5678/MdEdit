@@ -22,6 +22,7 @@ add_library(MdEditEditor STATIC
   src/editor/live/live_editor_resources.cpp
   src/editor/view/pdf_preview_panel.h src/editor/view/pdf_preview_panel.cpp
   src/editor/markdown_editor_widget.h src/editor/markdown_editor_widget.cpp
+  src/editor/wiki_navigation.h src/editor/wiki_navigation.cpp
   src/editor/markdown/block_parser.h src/editor/markdown/block_parser.cpp
   src/editor/render/renderer_registry.h src/editor/render/renderer_registry.cpp
   src/editor/resources/resource_manager.h src/editor/resources/resource_manager.cpp
@@ -108,6 +109,18 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  add_test(NAME web-link COMMAND MdEdit --web-link-test)
+  set_tests_properties(web-link PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_test(NAME selection-menu COMMAND MdEdit --selection-menu-test)
+  set_tests_properties(selection-menu PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  qt_add_executable(MdEditNavigationTests tests/navigation_tests.cpp)
+  target_link_libraries(MdEditNavigationTests PRIVATE MdEdit::Editor)
+  add_test(NAME navigation COMMAND MdEditNavigationTests)
+  set_tests_properties(navigation PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  qt_add_executable(MdEditResourceWindowTests tests/resource_window_tests.cpp)
+  target_link_libraries(MdEditResourceWindowTests PRIVATE MdEdit::Editor)
+  add_test(NAME resource-window COMMAND MdEditResourceWindowTests)
+  set_tests_properties(resource-window PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   qt_add_executable(MdEditBadgeTests tests/badge_tests.cpp)
   target_link_libraries(MdEditBadgeTests PRIVATE MdEdit::Editor)
   add_test(NAME badges COMMAND MdEditBadgeTests)
@@ -138,7 +151,7 @@ if(BUILD_TESTING)
   set_tests_properties(formula-vector PROPERTIES TIMEOUT 30)
   add_test(NAME embedded-editor COMMAND MdEdit --embedded-editor-test)
   set_tests_properties(embedded-editor PROPERTIES TIMEOUT 30)
-  add_test(NAME markdown-math-smoke COMMAND MdEdit --smoke-test "${CMAKE_CURRENT_SOURCE_DIR}/综合测试.md")
+  add_test(NAME markdown-math-smoke COMMAND MdEdit --smoke-test "${CMAKE_CURRENT_SOURCE_DIR}/综合测试/综合测试.md")
   set_tests_properties(markdown-math-smoke PROPERTIES TIMEOUT 60)
   if(WIN32)
     set_tests_properties(markdown-math-smoke embedded-editor formula-vector line-spacing highlight typing-style PROPERTIES

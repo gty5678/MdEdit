@@ -1,11 +1,13 @@
 #include "markdown_editor_widget.h"
 #include "highlighter.h"
+#include "../markdown/renderer.h"
 
 MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
     auto *layout=new QVBoxLayout(this);layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);layout->addWidget(pages);
     setFocusProxy(preview);
     timer.setSingleShot(true);timer.setInterval(150);
         previewAction=new QAction("Live 编辑",this);previewAction->setCheckable(true);previewAction->setChecked(true);previewAction->setShortcut(QKeySequence("Ctrl+E"));
+        previewAction->setToolTip(QString::fromUtf8(shortcutLabel)+"E 切换 Live / 源码");
         previewAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);addAction(previewAction);
         previewAction->setObjectName("livePreviewAction");editor->setObjectName("markdownEditor");preview->setObjectName("markdownPreview");
         editor->setFrameShape(QFrame::NoFrame);editor->setFont(QFont(editorFont,14));editor->setTabStopDistance(32);editor->document()->setDocumentMargin(32);new Highlighter(editor->document());
@@ -82,16 +84,19 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
         });
         connect(preview,&QTextBrowser::anchorClicked,this,[this](const QUrl &url){
             if(url.scheme()=="mdedit-wiki"){
-                const QString target=QUrl::fromPercentEncoding(url.path(QUrl::FullyEncoded).mid(1).toUtf8());
-                const QDir folder(baseUrl.isLocalFile()?baseUrl.toLocalFile():QDir::currentPath());
-                QString file=QDir::cleanPath(folder.absoluteFilePath(target));
-                if(!QFileInfo::exists(file)&&QFileInfo(file).suffix().isEmpty()){
-                    for(const QString &suffix:{QString(".md"),QString(".markdown")})
-                        if(QFileInfo::exists(file+suffix)){file+=suffix;break;}
+                followWikiLink(QUrl::fromPercentEncoding(url.path(QUrl::FullyEncoded).mid(1).toUtf8()));
+            }else if(url.isLocalFile()){
+                const QFileInfo folder(url.toLocalFile());
+                QString error;
+                if(!url.isValid()||!url.authority().isEmpty()||folder.isRelative()||!folder.isDir())
+                    error="请确认链接指向本机上存在的文件夹。";
+                else if(!QDesktopServices::openUrl(QUrl::fromLocalFile(folder.absoluteFilePath())))
+                    error="系统文件管理器无法打开此文件夹。";
+                if(!error.isEmpty()){
+                    auto *message=new QMessageBox(QMessageBox::Information,"无法打开文件夹",error,QMessageBox::Ok,this);
+                    message->setAttribute(Qt::WA_DeleteOnClose);message->open();
                 }
-                emit fileLinkActivated(file);
-            }
-            else if(url.scheme()=="https"||url.scheme()=="http")QDesktopServices::openUrl(url);
+            }else if(const auto web=normalizedWebLink(url);web.scheme()=="https"||web.scheme()=="http")QDesktopServices::openUrl(web);
             else if(url.isRelative()&&url.path().isEmpty()&&!url.fragment().isEmpty())preview->scrollToAnchor(url.fragment());
         });
         auto command=[this](const QString &name,const QKeySequence &key,std::function<void()> fn){
@@ -103,6 +108,8 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
         command("加粗",QKeySequence::Bold,[this]{formatSelection("**","**");});
         command("斜体",QKeySequence::Italic,[this]{formatSelection("*","*");});
         command("行内代码",QKeySequence("Ctrl+Shift+C"),[this]{formatSelection("`","`");});
+        command("删除线",{},[this]{formatSelection("~~","~~");});
+        command("高亮",{},[this]{formatSelection("==","==");});
         const QString basicTable="|  |  |\n| --- | --- |\n|  |  |\n\n";
         const auto insertTableAtLine=[this,basicTable](int offset){
             const auto text=editor->toPlainText();
@@ -118,6 +125,17 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
             const auto range=selection();insertTableAtLine(qMin(range.first,range.second));
         });
         command("插入链接",QKeySequence("Ctrl+K"),[this]{formatSelection("[","](url)");});
+        command("插入内部链接…",QKeySequence("Ctrl+Shift+L"),[this]{insertWikiLink();});
+        commands.last()->setObjectName("insertWikiLinkAction");
+        command("插入代码块",{},[this]{
+            const auto range=selection();
+            const int a=qMin(range.first,range.second),b=qMax(range.first,range.second);
+            const auto text=markdown();
+            const QString prefix=a>0&&text[a-1]!='\n'?"\n":"";
+            const QString suffix=b<text.size()&&text[b]!='\n'?"\n":"";
+            const int start=a+prefix.size()+4;
+            replaceSource(a,b,prefix+"```\n"+text.mid(a,b-a)+"\n```"+suffix,start,start+b-a);
+        });
         command("复制段落 / 选区",QKeySequence::Copy,[this]{clipboardParagraph(false);});
         command("剪切段落 / 选区",QKeySequence::Cut,[this]{clipboardParagraph(true);});
         command("增加缩进",QKeySequence("Ctrl+]"),[this]{indentSelection(false);});
@@ -130,6 +148,26 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
             int b=text.indexOf('\n',r.first);if(b<0){b=text.size();if(a>0)--a;}else ++b;
             replaceSource(a,b,{},a,a);
         });
+        // Reuse the same commands as the edit menu and keyboard shortcuts.
+        const auto populateSelectionMenu=[this](QMenu *menu){
+            const auto range=selection();
+            const QStringList names=range.first==range.second?
+                QStringList{"插入链接","插入内部链接…","插入代码块"}:QStringList{"加粗","斜体","删除线","高亮","插入内部链接…"};
+            menu->addSeparator();
+            for(const auto &name:names){
+                for(auto *action:commands)if(action->text()==name){menu->addAction(action);break;}
+            }
+        };
+        preview->populateSelectionMenu=populateSelectionMenu;
+        editor->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(editor,&QWidget::customContextMenuRequested,this,[this,populateSelectionMenu](const QPoint &pos){
+            if(!editor->textCursor().hasSelection())editor->setTextCursor(editor->cursorForPosition(pos));
+            auto *menu=editor->createStandardContextMenu();
+            menu->setObjectName("editorContextMenu");
+            populateSelectionMenu(menu);
+            menu->setAttribute(Qt::WA_DeleteOnClose);
+            menu->popup(editor->viewport()->mapToGlobal(pos));
+        });
         setStyleSheet(R"(MarkdownEditorWidget{background:#ffffff;color:#26232d;}QPlainTextEdit,QTextBrowser{border:0;selection-background-color:#e3d7f5;selection-color:#26232d;}QScrollBar:vertical{background:#ffffff;width:10px;}QScrollBar::handle:vertical{background:#a9a2b2;min-height:28px;border-radius:4px;}QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}QToolTip{color:#26232d;background:#f2eef7;})");
     applyBaseFontSize(14);
     render();
@@ -138,11 +176,20 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget *parent):QWidget(parent){
 QString MarkdownEditorWidget::markdown() const { return editor->toPlainText(); }
 QTextDocument *MarkdownEditorWidget::document() const { return editor->document(); }
 void MarkdownEditorWidget::setMarkdown(const QString &text){
+    resetWikiNavigation();
     editor->setPlainText(text);editor->document()->setModified(false);
-    timer.stop();render();selectSource(0,0);
-    editor->verticalScrollBar()->setValue(0);preview->verticalScrollBar()->setValue(0);
+    timer.stop();
+    editor->verticalScrollBar()->setValue(0);
+    if(isLiveMode()){
+        preview->document()->setBaseUrl(baseUrl);
+        preview->setSource(editor->toPlainText(),true);
+    }
 }
-void MarkdownEditorWidget::setBaseUrl(const QUrl &url){baseUrl=url;render();}
+void MarkdownEditorWidget::setMarkdown(const QString &text,const QUrl &url){
+    baseUrl=url;
+    setMarkdown(text);
+}
+void MarkdownEditorWidget::setBaseUrl(const QUrl &url){baseUrl=url;resetWikiNavigation();render();}
 bool MarkdownEditorWidget::isLiveMode() const {return previewAction->isChecked();}
 void MarkdownEditorWidget::setLiveMode(bool enabled){previewAction->setChecked(enabled);}
 void MarkdownEditorWidget::applyBaseFontSize(int size){
@@ -268,5 +315,4 @@ void MarkdownEditorWidget::render(){
     const int scroll=preview->verticalScrollBar()->value();
     preview->document()->setBaseUrl(baseUrl);
     preview->setSource(editor->toPlainText());preview->verticalScrollBar()->setValue(scroll);
-    previewAction->setToolTip(QString::fromUtf8(shortcutLabel)+"E 切换 Live / 源码");
 }

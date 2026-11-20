@@ -26,7 +26,11 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
     mutable QList<QPair<int,int>> numberedAtomicRanges;
     void updateLiveLineStarts() const;
     int liveLineAtSource(int position) const;
+    QTimer initialRenderTimer;
+    int initialRenderLimit=0;
     QTimer resourceRefreshTimer;
+    QTimer resourceWindowTimer;
+    void updateResourceWindow();
     int active=-1;
     bool rebuilding=false;
     bool backgroundRefresh=false;
@@ -85,6 +89,7 @@ class LiveEditor : public NumberedEditor<QTextBrowser> {
     bool mathPreviewVisible=false;
     QCache<QString,QTextDocument> renderedMarkdown{128};
     QSet<QString> resourceRenderKeys;
+    QSet<QString> activeResourceTexts;
     mdedit::ResourceManager resourceManager;
     int resourceSourceEditStart=-1;
     mdedit::PdfPreviewPanels pdfViews;
@@ -96,8 +101,9 @@ public:
     std::function<void(const QString &)> sourceChanged;
     std::function<void(bool)> history;
     std::function<void(int)> insertTableRequested;
+    std::function<void(QMenu *)> populateSelectionMenu;
     explicit LiveEditor();
-    void setSource(const QString &text);
+    void setSource(const QString &text,bool resetCursor=false);
     QString markdown()const;
     void refreshAppearance();
     QPair<int,int> sourceSelection()const;

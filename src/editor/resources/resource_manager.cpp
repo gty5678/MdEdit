@@ -26,12 +26,51 @@ QUrl ResourceResolver::resolve(const QString &uri,const QUrl &base) {
 }
 ResourceManager::ResourceManager(QObject *parent):QObject(parent){pool.setMaxThreadCount(2);}
 ResourceManager::~ResourceManager(){pool.clear();pool.waitForDone();}
-void ResourceManager::clear(){++revision;cache.clear();emit ready();}
+void ResourceManager::clear(){
+    ++revision;cache.clear();imageSizes.clear();
+    for(const auto &flag:cancelled)*flag=true;
+    emit ready();
+}
+QSet<QUrl> ResourceManager::referencedUrls(const QString &markdown,const QUrl &base) {
+    QSet<QUrl> urls;
+    static const QRegularExpression image(R"(!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))[^)]*\))");
+    auto matches=image.globalMatch(markdown);
+    while(matches.hasNext()){
+        const auto match=matches.next();
+        urls.insert(ResourceResolver::resolve(match.captured(1).isEmpty()?match.captured(2):match.captured(1),base));
+    }
+    return urls;
+}
+bool ResourceManager::setActiveUrls(const QSet<QUrl> &urls) {
+    if(windowed&&activeUrls==urls)return false;
+    windowed=true;activeUrls=urls;
+    for(auto it=keyUrls.begin();it!=keyUrls.end();){
+        if(!accepts(it.value())){cache.remove(it.key());if(cancelled.contains(it.key()))*cancelled.value(it.key())=true;it=keyUrls.erase(it);}else ++it;
+    }
+    for(auto *reply:network.findChildren<QNetworkReply *>())
+        if(!reply->isFinished()&&!accepts(reply->request().url()))reply->abort();
+    return true;
+}
+QSize ResourceManager::imageSize(const QUrl &url) {
+    if(imageSizes.contains(url))return imageSizes.value(url);
+    QSize size;
+    // Header inspection only: never decode pixels to lay out an offscreen image.
+    if(url.isLocalFile()){
+        QImageReader reader(url.toLocalFile());reader.setAutoTransform(true);size=reader.size();
+        if(reader.transformation()&QImageIOHandler::TransformationRotate90)size.transpose();
+        if(size.width()>1600||size.height()>1200)size.scale(1600,1200,Qt::KeepAspectRatio);
+    }
+    if(size.isValid())imageSizes.insert(url,size);
+    return size.isValid()?size:QSize(400,300);
+}
 QString ResourceManager::request(const QUrl &url,int page) {
     const QFileInfo info(url.toLocalFile());
     const QString key=url.toString()+QString("|%1|%2").arg(info.size()).arg(info.lastModified().toMSecsSinceEpoch())+QString("|%1|page=%2").arg(revision).arg(page);
+    if(!accepts(url))return key;
+    keyUrls.insert(key,url);
     if(cache.contains(key)||pending.contains(key))return key;
     pending.insert(key);
+    const auto cancel=std::make_shared<std::atomic_bool>(false);cancelled.insert(key,cancel);
     if(url.scheme()=="http"||url.scheme()=="https"){
         QNetworkRequest request(url);
         request.setTransferTimeout(15000);
@@ -44,9 +83,10 @@ QString ResourceManager::request(const QUrl &url,int page) {
             if(bytes->size()>32*1024*1024){*oversized=true;reply->abort();}
         });
         const auto generation=revision;
-        connect(reply,&QNetworkReply::finished,this,[this,reply,bytes,oversized,key,generation]{
+        connect(reply,&QNetworkReply::finished,this,[this,url,reply,bytes,oversized,key,generation,cancel]{
             bytes->append(reply->readAll());
-            pending.remove(key);
+            pending.remove(key);cancelled.remove(key);
+            if(*cancel){reply->deleteLater();if(accepts(url))emit ready();return;}
             ResourceSnapshot data;
             if(*oversized||bytes->size()>32*1024*1024)data.error="图片超过 32 MiB 限制";
             else if(reply->error()!=QNetworkReply::NoError)data.error="图片加载失败："+reply->errorString();
@@ -73,16 +113,19 @@ QString ResourceManager::request(const QUrl &url,int page) {
                 }
             }
             reply->deleteLater();
-            if(generation!=revision)return;
+            if(generation!=revision||!accepts(url))return;
+            if(!data.image.isNull())imageSizes.insert(url,data.image.size());
             const int cost=qMax(1,int(data.image.sizeInBytes()/1024));
             cache.insert(key,new ResourceSnapshot(std::move(data)),cost);emit ready();
         });
         return key;
     }
-    pool.start([this,url,key,page]{
+    const auto generation=revision;
+    pool.start([this,url,key,page,generation,cancel]{
         ResourceSnapshot data;
         const QString path=url.toLocalFile();QFileInfo file(path);
-        if(!url.isLocalFile())data.error="不支持的资源地址："+url.toString();
+        if(*cancel){}
+        else if(!url.isLocalFile())data.error="不支持的资源地址："+url.toString();
         else if(!file.isFile())data.error="资源不存在："+path;
         else if(file.size()>32*1024*1024)data.error="资源超过 32 MiB 限制："+path;
         else if(file.suffix().compare("pdf",Qt::CaseInsensitive)==0) {
@@ -143,8 +186,11 @@ QString ResourceManager::request(const QUrl &url,int page) {
             else {if(size.width()>1600||size.height()>1200)reader.setScaledSize(size.scaled(1600,1200,Qt::KeepAspectRatio));
                 data.image=reader.read();if(data.image.isNull())data.error="无法预览该资源："+reader.errorString();}
         }
-        QMetaObject::invokeMethod(this,[this,key,data=std::move(data)]() mutable {
-            pending.remove(key);
+        QMetaObject::invokeMethod(this,[this,url,key,generation,cancel,data=std::move(data)]() mutable {
+            pending.remove(key);cancelled.remove(key);
+            if(*cancel){if(accepts(url))emit ready();return;}
+            if(generation!=revision||!accepts(url))return;
+            if(!data.image.isNull())imageSizes.insert(url,data.image.size());
             int cost=qMax(1,int(data.image.sizeInBytes()/1024));
             if(data.text)cost+=data.text->size()*2/1024+1;
             for(const auto &row:data.rows)for(const auto &cell:row)cost+=cell.size()*2/1024+1;

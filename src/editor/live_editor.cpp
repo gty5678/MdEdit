@@ -2,6 +2,22 @@
 #include "../markdown/renderer.h"
 
 LiveEditor::LiveEditor(){
+        initialRenderTimer.setSingleShot(true);
+        initialRenderTimer.setInterval(80);
+        connect(&initialRenderTimer,&QTimer::timeout,this,[this]{
+            const auto caret=textCursor();
+            const int position=sourcePosition(caret.position());
+            const int anchor=sourcePosition(caret.anchor());
+            QScopedValueRollback<bool> refreshing(backgroundRefresh,true);
+            rebuild(-1,0,position);
+            // A user may already have selected or edited the first screen.
+            if(anchor!=position)restoreSourceSelection(anchor,position);
+        });
+        resourceManager.setActiveUrls({});
+        resourceWindowTimer.setSingleShot(true);resourceWindowTimer.setInterval(35);
+        connect(&resourceWindowTimer,&QTimer::timeout,this,&LiveEditor::updateResourceWindow);
+        connect(verticalScrollBar(),&QScrollBar::valueChanged,this,[this]{if(!rebuilding)resourceWindowTimer.start();});
+
         copyFeedbackTimer.setSingleShot(true);
         copyFeedbackTimer.setInterval(3000);
         connect(&copyFeedbackTimer,&QTimer::timeout,this,[this]{copiedCodeSource=-1;viewport()->update();});
@@ -88,10 +104,64 @@ LiveEditor::LiveEditor(){
         });
     }
 
-void LiveEditor::setSource(const QString &text){if(text==source&&!regions.isEmpty())return;cancelAxisDrag();cellRangeTable.clear();cellRangePressed=cellRangeDragging=false;axisSource=axisIndex=-1;resourceSourceEditStart=-1;mathEditSlotHeight=0;mathEditSourceStart=-1;source=text;rebuild(-1,0);}
+void LiveEditor::setSource(const QString &text,bool resetCursor){
+    const bool changed=text!=source||renderedBaseUrl!=document()->baseUrl();
+    if(!changed&&!resetCursor&&!regions.isEmpty())return;
+
+    cancelAxisDrag();
+    cellRangeTable.clear();cellRangePressed=cellRangeDragging=false;
+    axisSource=axisIndex=-1;resourceSourceEditStart=-1;
+    mathEditSlotHeight=0;mathEditSourceStart=-1;
+    if(changed){
+        resourceManager.setActiveUrls({});
+        resourceManager.clear();
+        // Clearing emits ready(), but the new document already gets a full rebuild.
+        resourceRefreshTimer.stop();
+        activeResourceTexts.clear();
+        resourceRenderKeys.clear();
+        renderedMarkdown.clear();
+    }
+    if(resetCursor){
+        // The old document's source offsets and viewport do not apply to a file switch.
+        regions.clear();
+        active=-1;
+    }
+    source=text;
+    // Render complete opening blocks first; keep source authoritative throughout.
+    initialRenderLimit=resetCursor&&text.size()>6000?2500:0;
+    const bool staged=initialRenderLimit>0;
+    rebuild(-1,0,resetCursor?0:-1);
+    if(staged)initialRenderTimer.start();
+    if(resetCursor){
+        verticalScrollBar()->setValue(0);
+        horizontalScrollBar()->setValue(0);
+    }
+}
 
 QString LiveEditor::markdown()const{return source;}
 
 void LiveEditor::refreshAppearance(){
         const auto range=sourceSelection();rebuild(-1,0);restoreSourceSelection(range.first,range.second);
     }
+
+void LiveEditor::updateResourceWindow(){
+    if(rebuilding)return;
+    QSet<QUrl> urls;
+    QSet<QString> texts;
+    if(!sourceExposed){
+        const qreal top=verticalScrollBar()->value()-viewport()->height();
+        const qreal bottom=verticalScrollBar()->value()+2*viewport()->height();
+        auto *layout=document()->documentLayout();
+        for(const auto &region:regions){
+            const auto first=document()->findBlock(region.start),last=document()->findBlock(region.end);
+            if(layout->blockBoundingRect(last).bottom()<top||layout->blockBoundingRect(first).top()>bottom)continue;
+            const auto text=source.mid(region.sourceStart,region.sourceEnd-region.sourceStart);
+            const auto referenced=mdedit::ResourceManager::referencedUrls(text,document()->baseUrl());
+            if(!referenced.isEmpty())texts.insert(text.trimmed());
+            urls.unite(referenced);
+        }
+    }
+    const bool changed=resourceManager.setActiveUrls(urls)||activeResourceTexts!=texts;
+    activeResourceTexts=texts;
+    if(changed)resourceRefreshTimer.start();
+}

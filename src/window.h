@@ -1,5 +1,8 @@
 #pragma once
 #include "editor/markdown_editor_widget.h"
+#include <QFileSystemModel>
+#include <QTreeView>
+#include <QDockWidget>
 
 class Window : public QMainWindow {
     MarkdownEditorWidget *editingSurface=new MarkdownEditorWidget;
@@ -7,13 +10,32 @@ class Window : public QMainWindow {
     QTimer autosave,statsTimer;
     bool loading=false;
     QString path;
+    QString projectRoot;
+    QFileSystemModel *fileModel=nullptr;
+    QTreeView *fileTree=nullptr;
+    QDockWidget *filesDock=nullptr;
+    void refreshFileTree();
+    QString projectFileDirectory(const QModelIndex &index) const;
+    QString selectedProjectFileDirectory() const;
+    void createProjectFolder(const QString &directory);
+    void moveProjectEntry(const QString &source,const QString &destination);
+    void renameProjectEntry(const QString &entry);
+    void deleteProjectEntry(const QString &entry);
+    void updateRecentPaths(const QString &source,const QString &destination);
+    void createProjectFile(const QString &directory);
+    void showDocument(const QString &file,const QString &markdown);
     bool documentOpen=false;
     QMenu *recentMenu=nullptr;
     void prepareSwitch(std::function<void()> next);
     void chooseSaveAs(std::function<void()> next={});
     void refreshRecentFiles();
     void rememberFile();
-    QLabel *documentStats=new QLabel;
+    QLabel *floatingStatus=nullptr;
+    QString documentStats;
+    QString statusMessage;
+    QTimer statusTimer;
+    void showStatusMessage(const QString &message,int timeout=0);
+    void updateFloatingStatus();
     int baseFontSize=14;
     const QFont defaultUiFont=QApplication::font();
 public:
@@ -33,8 +55,10 @@ public:
     void newDocument();
     bool saveAs(const QString &target);
     bool save();
-    void load(const QString &file);
+    void openFolder(const QString &folder);
+    void load(const QString &file,bool standalone=false);
 protected:
+    bool eventFilter(QObject *watched,QEvent *event) override;
     void closeEvent(QCloseEvent *e)override;
 };
 

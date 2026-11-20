@@ -21,8 +21,8 @@ QString LiveEditor::clickableAnchorAt(const QPoint &point) const{
             }
         }
         const QString anchor=anchorAt(point);
-        const QUrl url(anchor);
-        if(url.scheme()=="mdedit-pdf"||url.scheme()=="mdedit-wiki")return anchor;
+        const QUrl url=normalizedWebLink(QUrl(anchor));
+        if(url.scheme()=="mdedit-pdf"||url.scheme()=="mdedit-wiki"||url.isLocalFile())return anchor;
         if((url.isRelative()&&anchor.startsWith('#')&&!url.fragment().isEmpty())||
            ((url.scheme()=="http"||url.scheme()=="https")&&url.isValid()&&!url.host().isEmpty()))
             return anchor;
@@ -102,6 +102,7 @@ void LiveEditor::syncPdfViews(){
             const QString key=QString::number(sourcePosition(fragment.position()))+"|"+file.toString();
             QTextCursor cursor(document());cursor.setPosition(fragment.position());
             const QRect geometry=QRectF(cursorRect(cursor).left()+12,bounds.top()+42,image.width()-24,image.height()-54).toAlignedRect();
+            if(!geometry.intersects(viewport()->rect().adjusted(0,-viewport()->height(),0,viewport()->height())))continue;
             const auto *snapshot=resourceManager.lookup(resourceManager.request(file));
             placements.append({key,file,geometry,snapshot&&snapshot->error.isEmpty()&&file.isLocalFile()});
         }

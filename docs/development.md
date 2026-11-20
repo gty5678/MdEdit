@@ -120,6 +120,6 @@ ctest --preset macos-qt-debug
 ctest --test-dir build-macos-qt612 --output-on-failure
 ```
 
-当前 CTest 包含 architecture、table-edit、live-pdf、live-csv、typing-style、highlight、line-spacing、formula-vector、embedded-editor、inline-boundary、markdown-math-smoke 和 document-workflow 共 12 项。综合示例见 [综合测试.md](../综合测试.md)。
+当前 CTest 包含 architecture、table-edit、live-pdf、live-csv、typing-style、highlight、line-spacing、formula-vector、embedded-editor、inline-boundary、markdown-math-smoke 和 document-workflow 共 12 项。综合示例见 [综合测试.md](../综合测试/综合测试.md)。
 
 资源编辑器仍在持续完善，尚未实现远程资源加载、正文及嵌入资源外部变化自动刷新、DXF/GLB 预览和大表格虚拟化。独立预览基础组件与应用 Live 编辑器的能力范围不同；模块边界与实现限制见 [基础版本说明](resource-editor-foundation.md)。

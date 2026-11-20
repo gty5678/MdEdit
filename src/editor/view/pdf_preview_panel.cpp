@@ -60,6 +60,7 @@ mdedit::PdfPreviewPanels::~PdfPreviewPanels(){qDeleteAll(panels);}
 void mdedit::PdfPreviewPanels::sync(QAbstractScrollArea *outer,const QList<PdfPreviewPlacement> &placements){
     QSet<QString> used;
     for(const auto &placement:placements){
+        if(!placement.geometry.intersects(outer->viewport()->rect().adjusted(0,-outer->viewport()->height(),0,outer->viewport()->height())))continue;
         used.insert(placement.key);
         auto *panel=panels.value(placement.key);
         if(!placement.geometry.intersects(outer->viewport()->rect())){

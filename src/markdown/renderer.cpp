@@ -7,6 +7,14 @@
 #include <memory>
 #include <QPicture>
 
+// Markdown destinations may omit the scheme for a www address.
+QUrl normalizedWebLink(const QUrl &url){
+    if(!url.isRelative())return url;
+    QString address=url.toString().replace("\\.",".");
+    if(address.startsWith("www.",Qt::CaseInsensitive))return QUrl("https://"+address);
+    return url;
+}
+
 // Color source syntax without turning editable text into clickable anchors.
 QList<InlineEditingStyle> linkEditingStyles(const QString &source){
     QList<InlineEditingStyle> styles;
@@ -267,6 +275,34 @@ void restoreImageLinks(QTextDocument *document,const QString &source){
     }
 }
 
+static QString normalizeFileLinkSeparators(QString source){
+    static const QRegularExpression links(R"(\]\([ \t]*(?:<(file:[^<>\r\n]+)>|(file:[^<>\s)]+)))",
+        QRegularExpression::CaseInsensitiveOption);
+    auto matches=links.globalMatch(source);
+    if(!matches.hasNext())return source;
+
+    const auto spans=scanSpans(source);
+    static const QRegularExpression drive(R"(^file:/*([A-Za-z]:/))",QRegularExpression::CaseInsensitiveOption);
+    QList<QRegularExpressionMatch> destinations;
+    while(matches.hasNext()){
+        const auto match=matches.next();
+        const int group=match.capturedStart(1)>=0?1:2;
+        if(!match.capturedView(group).contains('\\')||escaped(source,match.capturedStart()))continue;
+        if(std::any_of(spans.cbegin(),spans.cend(),[&](const Span &span){
+            return match.capturedStart()<span.start+span.length&&match.capturedEnd()>span.start;
+        }))continue;
+        destinations.append(match);
+    }
+    for(auto it=destinations.crbegin();it!=destinations.crend();++it){
+        const int group=it->capturedStart(1)>=0?1:2;
+        QString url=it->captured(group);
+        url.replace('\\','/');
+        url.replace(drive,QStringLiteral("file:///\\1"));
+        source.replace(it->capturedStart(group),it->capturedLength(group),url);
+    }
+    return source;
+}
+
 int renderMarkdown(QTextDocument *document,const QString &source,QStringList &errors,bool live){
     document->setIndentWidth(24);
     auto *layout=document->documentLayout();
@@ -286,7 +322,7 @@ int renderMarkdown(QTextDocument *document,const QString &source,QStringList &er
         marked.replace(ranges[i].first,2,begin);
         markers.append({begin,end});
     }
-    document->setMarkdown(preserveLineBreaks(protectMath(markdownWithoutSetext(expandWikiLinks(marked)),math)));
+    document->setMarkdown(preserveLineBreaks(protectMath(markdownWithoutSetext(expandWikiLinks(normalizeFileLinkSeparators(marked))),math)));
     restoreImageLinks(document,source);
     for(const auto &marker:markers){
         auto begin=document->find(marker.first),end=document->find(marker.second);

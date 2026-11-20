@@ -40,6 +40,11 @@ void LiveEditor::restoreSourceSelection(int anchor,int position){
             setTextCursor(selected);
         }
         exposeSelectedRegions();
+        // A rendered boundary can represent several source offsets (for
+        // example the opening markers of bold text). Nearest visible positions
+        // cannot restore an exact range inside that hidden syntax.
+        if(anchor!=position&&sourceSelection()!=qMakePair(anchor,position))
+            exposeSource(anchor,position);
         ensureCursorVisible();
     }
 
@@ -275,7 +280,7 @@ void LiveEditor::styleActiveSource(){
         const bool joinedParagraph=!region.codeBlock&&!fenced&&isMultilineParagraph(raw);
         QTextDocument bodyStyle;bodyStyle.setDefaultFont(font());bodyStyle.setMarkdown("Body");
         static const QRegularExpression heading("^ {0,3}(#{1,6})(?:[ \t]+|$)");
-        static const QRegularExpression quote("^ {0,3}>");
+        static const QRegularExpression quote("^ {0,3}(?:>[ \t]*)+");
         if(region.inlinePart){
             QTextCursor part(document());part.setPosition(region.start);
             part.setPosition(region.end,QTextCursor::KeepAnchor);
@@ -295,7 +300,16 @@ void LiveEditor::styleActiveSource(){
                 if(block.position()>region.start)paragraph.setTopMargin(0);
                 if(block.next().isValid()&&block.next().position()<=region.end)paragraph.setBottomMargin(0);
             }
-            if(quote.match(block.text()).hasMatch())paragraph.setBackground(quoteBackground);
+            const auto quotePrefix=quote.match(block.text());
+            if(!region.codeBlock&&!fenced&&quotePrefix.hasMatch()){
+                // Keep the preview's quote indentation and available body width.
+                // Hang the editable markers in its margin so revealing them
+                // does not rewrap the body and move every following block.
+                paragraph=renderedDocument(block.text(),false)->begin().blockFormat();
+                paragraph.setObjectIndex(-1);
+                paragraph.setTextIndent(-QFontMetricsF(font()).horizontalAdvance(quotePrefix.captured()));
+                paragraph.setBackground(quoteBackground);
+            }
             const auto match=heading.match(block.text());
             setBodyLineHeight(paragraph,font());
             if(region.codeBlock||fenced){

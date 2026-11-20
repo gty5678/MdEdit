@@ -27,13 +27,20 @@ public:
 }
 
 MarkdownPreviewWidget::MarkdownPreviewWidget(QWidget *parent):QAbstractScrollArea(parent),resources(this) {
+    resources.setActiveUrls({});
+    windowTimer.setSingleShot(true);windowTimer.setInterval(35);
+    connect(&windowTimer,&QTimer::timeout,this,&MarkdownPreviewWidget::updateResourceWindow);
+    connect(verticalScrollBar(),&QScrollBar::valueChanged,this,[this]{windowTimer.start();});
     setObjectName("resourcePreview");setFrameShape(QFrame::NoFrame);
     connect(&resources,&ResourceManager::ready,this,[this]{relayout();});
     connect(verticalScrollBar(),&QScrollBar::valueChanged,viewport(),qOverload<>(&QWidget::update));
 }
 void MarkdownPreviewWidget::setSource(const QString &text,const QUrl &baseUrl) {
     if(source==text&&base==baseUrl&&!entries.empty())return;
-    source=text;base=baseUrl;entries.clear();
+    source=text;base=baseUrl;resources.setActiveUrls({});resources.clear();buildEntries();
+}
+void MarkdownPreviewWidget::buildEntries(){
+    entries.clear();
     for(const auto &block:MarkdownParser::parse(source)) {
         Entry entry;entry.block=block;
         if(!block.resource){
@@ -66,16 +73,17 @@ void MarkdownPreviewWidget::relayout() {
             const QString suffix=QFileInfo(QUrl(ref.uri).path()).suffix().toLower();
             if(suffix!="pdf"&&suffix!="csv"&&!ResourceResolver::isTextResource(QUrl(ref.uri))){
                 const auto *data=resources.lookup(resourceKey(entry));
-                if(data&&!data->image.isNull()){
-                    const qreal w=ref.width>0?ref.width:qMin(width,qreal(data->image.width()));
-                    entry.height=qBound(1.0,w*data->image.height()/data->image.width(),1000000.0);
+                const QSize size=data&&!data->image.isNull()?data->image.size():resources.imageSize(ResourceResolver::resolve(ref.uri,base));
+                {
+                    const qreal w=ref.width>0?ref.width:qMin(width,qreal(size.width()));
+                    entry.height=qBound(1.0,w*size.height()/size.width(),1000000.0);
                 }
             }
         }
         y+=entry.height+18;
     }
     verticalScrollBar()->setPageStep(viewport()->height());
-    verticalScrollBar()->setRange(0,qMax(0,int(y+24-viewport()->height())));viewport()->update();
+    verticalScrollBar()->setRange(0,qMax(0,int(y+24-viewport()->height())));viewport()->update();windowTimer.start();
 }
 void MarkdownPreviewWidget::refreshAppearance(){for(auto &entry:entries)if(entry.text)entry.text->setDefaultFont(font());relayout();}
 void MarkdownPreviewWidget::refreshResources(){resources.clear();relayout();}
@@ -123,7 +131,7 @@ void MarkdownPreviewWidget::mousePressEvent(QMouseEvent *event){
     for(const auto &entry:entries)if(y>=entry.top&&y<entry.top+entry.height){
         if(entry.text&&event->button()==Qt::LeftButton){
             const QString anchor=entry.text->documentLayout()->anchorAt(QPointF(event->position().x()-24,y-entry.top));
-            const QUrl url=base.resolved(QUrl(anchor));
+            const QUrl url=base.resolved(normalizedWebLink(QUrl(anchor)));
             if(!anchor.isEmpty()&&(url.scheme()=="https"||url.scheme()=="http")){
                 QDesktopServices::openUrl(url);event->accept();return;
             }
@@ -136,4 +144,17 @@ void MarkdownPreviewWidget::mousePressEvent(QMouseEvent *event){
     }
     QAbstractScrollArea::mousePressEvent(event);
 }
+}
+
+void mdedit::MarkdownPreviewWidget::updateResourceWindow(){
+    QSet<QUrl> urls;
+    const qreal top=verticalScrollBar()->value()-viewport()->height();
+    const qreal bottom=verticalScrollBar()->value()+2*viewport()->height();
+    for(const auto &entry:entries){
+        if(entry.top+entry.height<top||entry.top>bottom)continue;
+        urls.unite(ResourceManager::referencedUrls(source.mid(entry.block.source.begin,entry.block.source.end-entry.block.source.begin),base));
+    }
+    if(resources.setActiveUrls(urls)){
+        const int scroll=verticalScrollBar()->value();buildEntries();verticalScrollBar()->setValue(scroll);
+    }
 }

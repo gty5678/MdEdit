@@ -70,6 +70,13 @@ QList<Span> scanSpans(const QString &s){
             if(ch=='`'){
                 int j=i+count,end=-1;
                 while(j<s.size()){
+                    // Inline code may wrap within a paragraph, but cannot
+                    // close in another block across a blank line.
+                    if(s[j]=='\n'){
+                        int next=j+1;
+                        while(next<s.size()&&(s[next]==' '||s[next]=='\t'||s[next]=='\r'))++next;
+                        if(next<s.size()&&s[next]=='\n')break;
+                    }
                     if(s[j]!='`'){++j;continue;}int run=1;while(j+run<s.size()&&s[j+run]=='`')++run;
                     if(run==count){end=j+run;break;}j+=run;
                 }

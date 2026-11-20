@@ -306,6 +306,7 @@ void LiveEditor::mouseDoubleClickEvent(QMouseEvent *event){
 }
 void LiveEditor::contextMenuEvent(QContextMenuEvent *event){
     const auto cursor=cursorForPosition(event->pos());
+    if(!textCursor().hasSelection())setTextCursor(cursor);
     const auto *table=cursor.currentTable();
     const int region=table?regionAt(table->firstPosition()):-1;
     const int offset=region>=0?regions[region].sourceStart:sourcePosition(cursor.position());
@@ -373,6 +374,7 @@ void LiveEditor::contextMenuEvent(QContextMenuEvent *event){
             menu->removeAction(action);delete action;
         }
     }
+    if(populateSelectionMenu)populateSelectionMenu(menu);
     menu->addSeparator();
     auto *insert=menu->addAction("插入 2×2 表格",this,[this,offset]{if(insertTableRequested)insertTableRequested(offset);});
     insert->setObjectName("insertTable");insert->setEnabled(bool(insertTableRequested));

@@ -21,3 +21,5 @@ QString markdownWithoutSetext(const QString &source);
 int renderMarkdown(QTextDocument *document,const QString &source,QStringList &errors,bool live=false);
 
 void restoreImageLinks(QTextDocument *document,const QString &source);
+
+QUrl normalizedWebLink(const QUrl &url);
